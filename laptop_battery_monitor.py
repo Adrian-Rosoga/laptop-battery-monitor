@@ -1,9 +1,12 @@
-"""Tray-controlled background monitor for Windows 11.
+"""
+Tray-controlled background monitor for Windows 11.
 
 Usage:
-  pip install pystray pillow psutil
+    pip install pystray pillow psutil
   # Optional for Windows toast notifications:
-  pip install win10toast
+    pip install plyer
+  # Optional for Telegram alerts:
+    pip install telegram-send
 
 Run:
   python monitor.py
@@ -12,10 +15,6 @@ This script creates a system tray icon with a menu to Start/Stop the background
 monitoring thread, Show Status, and Exit. The background task polls battery
 information using `psutil` as an example workload.
 
-Tell which python modules are needed for the program to work.
-
-Short answer — modules used (grouped by install requirement):
-
 Standard library: threading, time, socket, sys, os, json, ctypes, asyncio
 
 Usually installed with Python on Windows (may need OS package): tkinter
@@ -23,18 +22,16 @@ Usually installed with Python on Windows (may need OS package): tkinter
 Install via pip (required/optional third‑party):
     Required for tray/UI/battery: pystray, pillow (provides PIL), psutil
     Optional (Telegram alerts): telegram-send
-    Optional (Windows toast notifications): win10toast
+    Optional (Windows toast notifications): plyer
 
 Install command (recommended):
-    pip install pystray pillow psutil telegram-send win10toast
+    python -m pip install pystray pillow psutil telegram-send plyer
 
 Notes:
-
 If you enable Telegram in Settings, run telegram-send --configure to link a bot/chat or provide
 a config path in the Settings UI.
 tkinter is typically included with standard Windows Python; if missing, install the appropriate
 Python installer/feature.
-
 """
 
 import threading

@@ -1,0 +1,5 @@
+pystray
+pillow
+psutil
+telegram-send
+plyer
