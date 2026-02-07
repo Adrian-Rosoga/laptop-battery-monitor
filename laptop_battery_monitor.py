@@ -32,6 +32,9 @@ If you enable Telegram in Settings, run telegram-send --configure to link a bot/
 a config path in the Settings UI.
 tkinter is typically included with standard Windows Python; if missing, install the appropriate
 Python installer/feature.
+
+You can write the config file once to a known location on your (non-container) computer:
+telegram-send --configure --config ~/telegram-send.conf
 """
 
 import threading

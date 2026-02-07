@@ -3,3 +3,4 @@ pillow
 psutil
 telegram-send
 plyer
+tkinter
