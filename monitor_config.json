@@ -1,6 +1,6 @@
 {
   "threshold": 25,
-  "interval": 60,
+  "interval": 1,
   "telegram_enabled": true,
   "telegram_conf": null,
   "start_minimized": false,

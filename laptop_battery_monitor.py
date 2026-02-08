@@ -1,39 +1,23 @@
 """
 Tray-controlled background monitor for Windows 11.
 
-Usage:
-    pip install pystray pillow psutil
-  # Optional for Windows toast notifications:
-    pip install plyer
-  # Optional for Telegram alerts:
-    pip install telegram-send
-
-Run:
-  python monitor.py
-
 This script creates a system tray icon with a menu to Start/Stop the background
 monitoring thread, Show Status, and Exit. The background task polls battery
 information using `psutil` as an example workload.
 
-Standard library: threading, time, socket, sys, os, json, ctypes, asyncio
+Install command (run once on your machine to install dependencies):
+    python -m pip install pystray pillow psutil telegram-send plyer tkinter
 
-Usually installed with Python on Windows (may need OS package): tkinter
-
-Install via pip (required/optional third‑party):
-    Required for tray/UI/battery: pystray, pillow (provides PIL), psutil
-    Optional (Telegram alerts): telegram-send
-    Optional (Windows toast notifications): plyer
-
-Install command (recommended):
-    python -m pip install pystray pillow psutil telegram-send plyer
+Run:
+  python monitor.py
 
 Notes:
-If you enable Telegram in Settings, run telegram-send --configure to link a bot/chat or provide
-a config path in the Settings UI.
-tkinter is typically included with standard Windows Python; if missing, install the appropriate
-Python installer/feature.
+If you enable Telegram in Settings, run telegram-send --configure to link a bot/chat
+or provide a config path in the Settings UI.
+tkinter is typically included with standard Windows Python; if missing, install
+the appropriate Python installer/feature.
 
-You can write the config file once to a known location on your (non-container) computer:
+You can write the config file once to a known location on your computer:
 telegram-send --configure --config ~/telegram-send.conf
 """
 
@@ -51,7 +35,7 @@ except Exception:
 
 try:
     import pystray
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 except Exception:
     pystray = None
 
@@ -71,24 +55,76 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
 
 
-def make_icon_image(size=64, color1=(0, 122, 204), color2=(255, 255, 255)):
-    """Generate a simple square icon with a battery-like glyph."""
+def make_icon_image(size=128, color1=(0, 122, 204), color2=(255, 255, 255), percentage=None, plugged=False):
+    """Generate a simple square icon with a battery-like glyph and optional percentage text.
+    
+    Args:
+        size: Icon size in pixels
+        color1: Primary color (unused, kept for compatibility)
+        color2: Secondary color (unused, kept for compatibility)
+        percentage: Battery percentage to display
+        plugged: Whether the laptop is charging (True = light green, False = light yellow)
+    """
     image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.ellipse((0, 0, size, size), fill=color1)
-    pad = size // 6
-    left = pad
-    top = pad * 2
-    right = size - pad
-    bottom = size - pad * 2
-    draw.rectangle((left, top, right - pad // 2, bottom), fill=color2)
-    draw.rectangle((right - pad // 2, top + (pad // 2), right, bottom - (pad // 2)), fill=color2)
+    
+    # Draw background based on charging status
+    # Light green (144, 238, 144) if charging, light yellow (255, 255, 0) if not
+    bg_color = (144, 238, 144, 255) if plugged else (255, 255, 0, 255)
+    draw.rectangle((0, 0, size, size), fill=bg_color)
+    
+    # draw.ellipse((0, 0, size, size), fill=color1)
+    # pad = size // 6
+    # left = pad
+    # top = pad * 2
+    # right = size - pad
+    # bottom = size - pad * 2
+    # draw.rectangle((left, top, right - pad // 2, bottom), fill=color2)
+    # draw.rectangle((right - pad // 2, top + (pad // 2), right, bottom - (pad // 2)), fill=color2)
+    
+    # Draw percentage text if provided
+    if percentage is not None:
+        try:
+            # Try to use a bold system font with larger size to fill the icon
+            font_size = int(size * 0.7)
+            # Try common system fonts
+            font = None
+            for font_name in ['arial.ttf', 'ariblk.ttf', 'arial black.ttf', 'calibrib.ttf']:
+                try:
+                    font = ImageFont.truetype(font_name, font_size)
+                    break
+                except Exception:
+                    try:
+                        font = ImageFont.truetype(f"C:\\Windows\\Fonts\\{font_name}", font_size)
+                        break
+                    except Exception:
+                        continue
+            
+            if font is None:
+                # Fallback to default font if no TTF found
+                try:
+                    font = ImageFont.load_default()
+                except Exception:
+                    font = None
+            
+            if font:
+                text = f"{int(percentage)}"
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                x = (size - text_width) // 2
+                y = (size - text_height) // 2
+                # Draw text in red
+                draw.text((x, y), text, fill=(255, 0, 0, 255), font=font)
+        except Exception:
+            pass
+    
     return image
 
 
 DEFAULT_CONFIG = {
     "threshold": 20,
-    "interval": 60,
+    "interval": 1,
     "telegram_enabled": False,
     "telegram_conf": None
 }
@@ -150,15 +186,15 @@ class SettingsWindow:
             raise RuntimeError("tkinter not available")
 
         self.root = tk.Tk()
-        self.root.title("Monitor Settings")
-        self.root.geometry("320x200")
+        self.root.title("Battery Monitor Settings")
+        self.root.geometry("320x300")
 
         tk.Label(self.root, text="Low battery threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
         self.threshold_var = tk.StringVar(value=str(self.config.get('threshold', 20)))
         tk.Entry(self.root, textvariable=self.threshold_var).pack(fill='x', padx=8)
 
         tk.Label(self.root, text="Check interval (s)").pack(anchor='w', padx=8, pady=(8, 0))
-        self.interval_var = tk.StringVar(value=str(self.config.get('interval', 60)))
+        self.interval_var = tk.StringVar(value=str(self.config.get('interval', 1)))
         tk.Entry(self.root, textvariable=self.interval_var).pack(fill='x', padx=8)
 
         self.telegram_var = tk.BooleanVar(value=bool(self.config.get('telegram_enabled')))
@@ -193,7 +229,8 @@ class SettingsWindow:
             save_config(self.config)
             if self.on_save:
                 self.on_save(self.config)
-            messagebox.showinfo("Settings", "Saved")
+            save_message = f"Settings saved to:\n{CONFIG_PATH}"
+            messagebox.showinfo("Settings", save_message)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -221,13 +258,14 @@ class TrayMonitor:
 
         self.icon = None
         if pystray:
-            image = make_icon_image()
+            image = make_icon_image(size=512, percentage=100, plugged=True)
             menu = pystray.Menu(
                 pystray.MenuItem('Start Monitoring', self.start_monitoring),
                 pystray.MenuItem('Stop Monitoring', self.stop_monitoring),
                 pystray.MenuItem('Show Status', self.show_status),
                 pystray.MenuItem('Show Console', self.show_console),
                 pystray.MenuItem('Settings', self.open_settings),
+                pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
             )
             self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Monitor: {HOSTNAME}", menu)
@@ -267,6 +305,11 @@ class TrayMonitor:
         except Exception:
             pass
         self._notify(msg)
+
+    def show_about(self, icon=None, item=None):
+        """Show About dialog."""
+        message = "Laptop Battery Monitor\nAdrian Rosoga (but really GPT-5 mini and Claude Haiku 4.5)\nFebruary 2026"
+        self._notify(message)
 
     def open_settings(self, icon=None, item=None):
         if tk is None:
@@ -331,12 +374,22 @@ class TrayMonitor:
             time_left = f"{hours}h {minutes}m"
         return {"percent": bat.percent, "plugged": bat.power_plugged, "time_left": time_left}
 
+    def _update_icon(self, percentage, plugged=False):
+        """Update the tray icon with current battery percentage and charging status."""
+        try:
+            if self.icon and pystray:
+                image = make_icon_image(size=512, percentage=percentage, plugged=plugged)
+                self.icon.icon = image
+        except Exception:
+            pass
+
     def _monitor_loop(self):
+        icon_update_counter = 0
         while not self._stop_event.is_set():
             # refresh config each loop in case user changed settings
             cfg = load_config()
             self.config.update(cfg)
-            interval = int(self.config.get('interval', 60))
+            interval = int(self.config.get('interval', 1))
             threshold = int(self.config.get('threshold', 20))
             resend_minutes = int(self.config.get('resend_minutes', 5))
             resend_seconds = resend_minutes * 60
@@ -346,6 +399,10 @@ class TrayMonitor:
                 percent = info['percent']
                 plugged = info['plugged']
                 now = time.time()
+                
+                # Update icon with battery percentage and charging status
+                self._update_icon(percent, plugged=plugged)
+                
                 if (not plugged) and (percent <= threshold):
                     # Enter low state and send (or resend) low-battery alert
                     if (self._last_alert_time is None) or ((now - self._last_alert_time) >= resend_seconds):
