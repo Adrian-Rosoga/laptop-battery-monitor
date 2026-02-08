@@ -50,9 +50,17 @@ try:
 except Exception:
     tk = None
 
-__version__ = "1.0"
+__version__ = "1.1"
 HOSTNAME = socket.gethostname()
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Determine ROOT_DIR based on whether running as executable or script
+if getattr(sys, 'frozen', False):
+    # Running as a PyInstaller executable
+    ROOT_DIR = os.path.dirname(sys.executable)
+else:
+    # Running as a Python script
+    ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
 
 
