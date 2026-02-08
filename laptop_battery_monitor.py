@@ -242,7 +242,7 @@ class SettingsWindow:
         if not self.config.get('telegram_enabled'):
             messagebox.showwarning("Telegram", "Telegram is not enabled in settings")
             return
-        msg = f"Test from {HOSTNAME}"
+        msg = f"Test message"
         send_telegram_async(msg, conf=self.config.get('telegram_conf'))
         messagebox.showinfo("Telegram", "Test message sent (if configured)")
 
@@ -295,7 +295,7 @@ class TrayMonitor:
         if self._thread:
             self._thread.join(timeout=2)
         self._running = False
-        self._notify(f"Monitoring stopped on {HOSTNAME}")
+        self._notify(f"Battery monitoring stopped")
 
     def show_status(self, icon=None, item=None):
         status = "Running" if self._running else "Stopped"
@@ -375,7 +375,7 @@ class TrayMonitor:
         
         # Send exit Telegram message if enabled
         if self.config.get('telegram_enabled'):
-            exit_msg = f"Monitoring stopped on {HOSTNAME}"
+            exit_msg = f"⏹️ Monitoring stopped on {HOSTNAME}"
             send_telegram_async(exit_msg, conf=self.config.get('telegram_conf'))
         
         if self.icon:
@@ -437,7 +437,7 @@ class TrayMonitor:
                 if (not plugged) and (percent <= threshold):
                     # Enter low state and send (or resend) low-battery alert
                     if (self._last_alert_time is None) or ((now - self._last_alert_time) >= resend_seconds):
-                        msg = f"Battery low on {HOSTNAME}: {percent}%"
+                        msg = f"🔋 Battery low: {percent}%"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
                         self._notify(msg)
@@ -459,7 +459,7 @@ class TrayMonitor:
                             dur_text = f"was low for {mins}m {secs}s"
                         else:
                             dur_text = ""
-                        rec_msg = f"Battery recovered on {HOSTNAME}: {percent}%"
+                        rec_msg = f"✅ Battery recovered on {HOSTNAME}: {percent}%"
                         if dur_text:
                             rec_msg += f" — {dur_text}"
                         if self.config.get('telegram_enabled'):
@@ -506,7 +506,7 @@ if __name__ == '__main__':
     
     # Send startup Telegram message if enabled
     if cfg.get('telegram_enabled'):
-        startup_msg = f"Monitoring started on {HOSTNAME}"
+        startup_msg = f"▶️ Battery monitoring started"
         send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
     
     monitor.run()
