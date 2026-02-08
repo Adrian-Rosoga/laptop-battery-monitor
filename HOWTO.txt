@@ -1,0 +1,11 @@
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt pyinstaller
+
+python -m PyInstaller laptop_battery_monitor.spec --distpath dist --workpath build --noconfirm
+
+python -m PyInstaller --onefile --noconsole --icon=icon_coco.ico -n laptop_battery_monitor laptop_battery_monitor.py
+
+Start-Process .\dist\laptop_battery_monitor.exe
