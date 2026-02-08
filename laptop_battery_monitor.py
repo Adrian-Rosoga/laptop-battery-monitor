@@ -50,6 +50,7 @@ try:
 except Exception:
     tk = None
 
+__version__ = "1.0"
 HOSTNAME = socket.gethostname()
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
@@ -128,7 +129,6 @@ DEFAULT_CONFIG = {
     "telegram_enabled": False,
     "telegram_conf": None
 }
-DEFAULT_CONFIG["start_minimized"] = False
 DEFAULT_CONFIG["resend_minutes"] = 5
 
 
@@ -203,11 +203,8 @@ class SettingsWindow:
         tk.Label(self.root, text="telegram-send config file (optional)").pack(anchor='w', padx=8, pady=(8, 0))
         self.telegram_conf_var = tk.StringVar(value=str(self.config.get('telegram_conf') or ""))
         tk.Entry(self.root, textvariable=self.telegram_conf_var).pack(fill='x', padx=8)
-
-        self.start_minimized_var = tk.BooleanVar(value=bool(self.config.get('start_minimized')))
-        tk.Checkbutton(self.root, text="Start minimized (hide console)", variable=self.start_minimized_var).pack(anchor='w', padx=8, pady=(8, 0))
         
-        tk.Label(self.root, text="Resend low-battery every (minutes)").pack(anchor='w', padx=8, pady=(8, 0))
+        tk.Label(self.root, text="Resend Low-Battery Telegram alert every (minutes)").pack(anchor='w', padx=8, pady=(8, 0))
         self.resend_var = tk.StringVar(value=str(self.config.get('resend_minutes', 5)))
         tk.Entry(self.root, textvariable=self.resend_var).pack(fill='x', padx=8)
 
@@ -221,7 +218,6 @@ class SettingsWindow:
         try:
             self.config['threshold'] = int(self.threshold_var.get())
             self.config['interval'] = int(self.interval_var.get())
-            self.config['start_minimized'] = bool(self.start_minimized_var.get())
             self.config['resend_minutes'] = int(self.resend_var.get())
             self.config['telegram_enabled'] = bool(self.telegram_var.get())
             conf = self.telegram_conf_var.get().strip()
@@ -263,7 +259,6 @@ class TrayMonitor:
                 pystray.MenuItem('Start Monitoring', self.start_monitoring),
                 pystray.MenuItem('Stop Monitoring', self.stop_monitoring),
                 pystray.MenuItem('Show Status', self.show_status),
-                pystray.MenuItem('Show Console', self.show_console),
                 pystray.MenuItem('Settings', self.open_settings),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
@@ -307,9 +302,45 @@ class TrayMonitor:
         self._notify(msg)
 
     def show_about(self, icon=None, item=None):
-        """Show About dialog."""
-        message = "Laptop Battery Monitor\nAdrian Rosoga (but really GPT-5 mini and Claude Haiku 4.5)\nFebruary 2026"
-        self._notify(message)
+        """Show About dialog with clickable GitHub link."""
+        if tk is None:
+            self._notify("tkinter not available; cannot open About dialog.")
+            return
+        
+        def _show_about():
+            about_window = tk.Tk()
+            about_window.title("About")
+            about_window.geometry("400x220")
+            about_window.resizable(False, False)
+            
+            # Title and version
+            title_label = tk.Label(about_window, text=f"Laptop Battery Monitor v{__version__}", font=("Arial", 12, "bold"))
+            title_label.pack(pady=10)
+            
+            # Description
+            desc_label = tk.Label(about_window, text="Monitors battery status and sends alerts when low.\nConfigurable threshold, interval, and Telegram integration.", justify=tk.CENTER)
+            desc_label.pack(pady=5)
+            
+            # Clickable GitHub link
+            def open_github():
+                import webbrowser
+                webbrowser.open("https://github.com/Adrian-Rosoga/laptop-battery-monitor")
+            
+            github_link = tk.Label(about_window, text="GitHub Repository", fg="blue", cursor="hand2", font=("Arial", 10, "underline"))
+            github_link.pack(pady=5)
+            github_link.bind("<Button-1>", lambda e: open_github())
+            
+            # Credits
+            credits_label = tk.Label(about_window, text="Adrian Rosoga (actually GPT-5 mini and Claude Haiku 4.5)\nFebruary 2026", font=("Arial", 9))
+            credits_label.pack(pady=10)
+            
+            # Close button
+            close_button = tk.Button(about_window, text="Close", command=about_window.destroy)
+            close_button.pack(pady=10)
+            
+            about_window.mainloop()
+        
+        threading.Thread(target=_show_about, daemon=True).start()
 
     def open_settings(self, icon=None, item=None):
         if tk is None:
@@ -321,26 +352,6 @@ class TrayMonitor:
             win.root.mainloop()
 
         threading.Thread(target=_open, daemon=True).start()
-
-    def show_console(self, icon=None, item=None):
-        """Show or restore the console window on Windows."""
-        if os.name != 'nt':
-            self._notify("Show Console is only supported on Windows")
-            return
-        try:
-            import ctypes
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if not hwnd:
-                self._notify("No console window found")
-                return
-            # SW_RESTORE = 9, SW_SHOW = 5
-            ctypes.windll.user32.ShowWindow(hwnd, 9)
-            try:
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-            except Exception:
-                pass
-        except Exception as e:
-            self._notify(f"Failed to show console: {e}")
 
     def _on_config_save(self, cfg):
         self.config = cfg
@@ -470,16 +481,6 @@ class TrayMonitor:
 if __name__ == '__main__':
     cfg = load_config()
     monitor = TrayMonitor(config=cfg)
-    # optionally hide console on Windows when starting minimized
-    if cfg.get('start_minimized') and os.name == 'nt':
-        try:
-            import ctypes
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE == 0
-        except Exception:
-            pass
-
     # start monitoring automatically on launch
     monitor.start_monitoring()
     monitor.run()
