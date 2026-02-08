@@ -256,14 +256,20 @@ class TrayMonitor:
         if pystray:
             image = make_icon_image(size=512, percentage=100, plugged=True)
             menu = pystray.Menu(
-                pystray.MenuItem('Start Monitoring', self.start_monitoring),
-                pystray.MenuItem('Stop Monitoring', self.stop_monitoring),
+                pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._running),
                 pystray.MenuItem('Show Status', self.show_status),
                 pystray.MenuItem('Settings', self.open_settings),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
             )
-            self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Monitor: {HOSTNAME}", menu)
+            self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Battery Monitor: {HOSTNAME}", menu)
+
+    def toggle_monitoring(self, icon=None, item=None):
+        """Toggle monitoring on/off."""
+        if self._running:
+            self.stop_monitoring()
+        else:
+            self.start_monitoring()
 
     def start_monitoring(self, icon=None, item=None):
         if self._running:
@@ -284,11 +290,11 @@ class TrayMonitor:
         self._notify(f"Monitoring stopped on {HOSTNAME}")
 
     def show_status(self, icon=None, item=None):
-        status = "running" if self._running else "stopped"
+        status = "Running" if self._running else "Stopped"
         info = self._get_battery_info() if psutil else None
         msg = f"{HOSTNAME}: {status}"
         if info:
-            msg += f" — {info['percent']}% {'(plugged)' if info['plugged'] else ''}"
+            msg += f" — Battery {info['percent']}% {'(plugged)' if info['plugged'] else ''}"
         # include time since last low-battery alert if available
         try:
             last = self._last_alert_time
@@ -318,7 +324,7 @@ class TrayMonitor:
             title_label.pack(pady=10)
             
             # Description
-            desc_label = tk.Label(about_window, text="Monitors battery status and sends alerts when low.\nConfigurable threshold, interval, and Telegram integration.", justify=tk.CENTER)
+            desc_label = tk.Label(about_window, text="Monitors battery status and sends Telegram alerts when low.\nConfigurable threshold, interval, and Telegram integration.", justify=tk.CENTER)
             desc_label.pack(pady=5)
             
             # Clickable GitHub link
@@ -358,6 +364,12 @@ class TrayMonitor:
 
     def exit(self, icon=None, item=None):
         self.stop_monitoring()
+        
+        # Send exit Telegram message if enabled
+        if self.config.get('telegram_enabled'):
+            exit_msg = f"Monitoring stopped on {HOSTNAME}"
+            send_telegram_async(exit_msg, conf=self.config.get('telegram_conf'))
+        
         if self.icon:
             self.icon.stop()
 
@@ -464,7 +476,7 @@ class TrayMonitor:
     def _notify(self, message):
         try:
             from plyer import notification
-            notification.notify(title="Monitor", message=message, timeout=5)
+            notification.notify(title="Battery Monitor", message=message, timeout=5)
             return
         except Exception:
             pass
@@ -483,4 +495,10 @@ if __name__ == '__main__':
     monitor = TrayMonitor(config=cfg)
     # start monitoring automatically on launch
     monitor.start_monitoring()
+    
+    # Send startup Telegram message if enabled
+    if cfg.get('telegram_enabled'):
+        startup_msg = f"Monitoring started on {HOSTNAME}"
+        send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
+    
     monitor.run()
