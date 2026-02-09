@@ -1,8 +1,9 @@
 {
-  "threshold": 27,
+  "threshold": 52,
   "interval": 1,
   "telegram_enabled": true,
   "telegram_conf": null,
+  "logging_enabled": false,
   "resend_minutes": 5,
   "start_minimized": false
 }

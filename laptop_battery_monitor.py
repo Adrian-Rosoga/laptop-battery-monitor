@@ -1,15 +1,15 @@
 """
-Tray-controlled background monitor for Windows 11.
+Tray-controlled background battery monitor for Windows 11.
 
-This script creates a system tray icon with a menu to Start/Stop the background
-monitoring thread, Show Status, and Exit. The background task polls battery
-information using `psutil` as an example workload.
+This Python script creates a system tray icon with a menu to configure the background
+monitoring thread, show status and exit. The monitor checks battery status at a
+configurable interval and sends Telegram status reports.
 
 Install command (run once on your machine to install dependencies):
     python -m pip install pystray pillow psutil telegram-send plyer tkinter
 
 Run:
-  python monitor.py
+    python monitor.py
 
 Notes:
 If you enable Telegram in Settings, run telegram-send --configure to link a bot/chat
@@ -27,31 +27,38 @@ import socket
 import sys
 import os
 import json
+import logging
 
 try:
     import psutil
-except Exception:
+except Exception as e:
+    logging.warning(f"psutil not available: {e}")
     psutil = None
 
 try:
     import pystray
     from PIL import Image, ImageDraw, ImageFont
-except Exception:
+except Exception as e:
+    logging.warning(f"pystray/PIL not available: {e}")
     pystray = None
 
 try:
     import telegram_send
-except Exception:
+except Exception as e:
+    logging.warning(f"telegram_send not available: {e}")
     telegram_send = None
 
 try:
     import tkinter as tk
     from tkinter import messagebox
-except Exception:
+except Exception as e:
+    logging.warning(f"tkinter not available: {e}")
     tk = None
 
-__version__ = "1.1"
+__version__ = "1.2"
 HOSTNAME = socket.gethostname()
+LOG_LEVEL = logging.DEBUG
+#LOG_LEVEL = logging.CRITICAL    # To actually disable logging output, set to CRITICAL and use logging.debug for all log messages in code
 
 # Determine ROOT_DIR based on whether running as executable or script
 if getattr(sys, 'frozen', False):
@@ -65,7 +72,7 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
 
 
 def make_icon_image(size=128, color1=(0, 122, 204), color2=(255, 255, 255), percentage=None, plugged=False):
-    """Generate a simple square icon with a battery-like glyph and optional percentage text.
+    """Generate a simple icon with battery percentage text.
     
     Args:
         size: Icon size in pixels
@@ -81,52 +88,43 @@ def make_icon_image(size=128, color1=(0, 122, 204), color2=(255, 255, 255), perc
     # Light green (144, 238, 144) if charging, light yellow (255, 255, 0) if not
     bg_color = (144, 238, 144, 255) if plugged else (255, 255, 0, 255)
     draw.rectangle((0, 0, size, size), fill=bg_color)
-    
-    # draw.ellipse((0, 0, size, size), fill=color1)
-    # pad = size // 6
-    # left = pad
-    # top = pad * 2
-    # right = size - pad
-    # bottom = size - pad * 2
-    # draw.rectangle((left, top, right - pad // 2, bottom), fill=color2)
-    # draw.rectangle((right - pad // 2, top + (pad // 2), right, bottom - (pad // 2)), fill=color2)
-    
+        
     # Draw percentage text if provided
     if percentage is not None:
         try:
             # Try to use a bold system font with larger size to fill the icon
-            font_size = int(size * 0.7)
+            font_size = int(size * 1.0)
             # Try common system fonts
             font = None
-            for font_name in ['arial.ttf', 'ariblk.ttf', 'arial black.ttf', 'calibrib.ttf']:
+            for font_name in ['calibrib.ttf', 'arial.ttf', 'ariblk.ttf', 'arial black.ttf', 'calibrib.ttf']:
                 try:
                     font = ImageFont.truetype(font_name, font_size)
                     break
-                except Exception:
+                except Exception as e:
+                    logging.debug(f"Font {font_name} not found: {e}")
                     try:
                         font = ImageFont.truetype(f"C:\\Windows\\Fonts\\{font_name}", font_size)
                         break
-                    except Exception:
+                    except Exception as e2:
+                        logging.debug(f"Font at C:\\Windows\\Fonts\\{font_name} not found: {e2}")
                         continue
             
             if font is None:
                 # Fallback to default font if no TTF found
                 try:
                     font = ImageFont.load_default()
-                except Exception:
+                except Exception as e:
+                    logging.debug(f"Failed to load default font: {e}")
                     font = None
             
             if font:
                 text = f"{int(percentage)}"
-                bbox = draw.textbbox((0, 0), text, font=font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                x = (size - text_width) // 2
-                y = (size - text_height) // 2
-                # Draw text in red
-                draw.text((x, y), text, fill=(255, 0, 0, 255), font=font)
-        except Exception:
-            pass
+                # Draw text centered using anchor point
+                center_x = size // 2
+                center_y = size // 2
+                draw.text((center_x, center_y), text, fill=(255, 0, 0, 255), font=font, anchor="mm")
+        except Exception as e:
+            logging.debug(f"Error creating icon image: {e}")
     
     return image
 
@@ -135,7 +133,8 @@ DEFAULT_CONFIG = {
     "threshold": 20,
     "interval": 1,
     "telegram_enabled": False,
-    "telegram_conf": None
+    "telegram_conf": None,
+    "logging_enabled": False
 }
 DEFAULT_CONFIG["resend_minutes"] = 5
 
@@ -145,9 +144,25 @@ def load_config():
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
             DEFAULT_CONFIG.update(cfg)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"Could not load config from {CONFIG_PATH}: {e}")
     return dict(DEFAULT_CONFIG)
+
+
+def setup_logging(enabled):
+    """Configure logging based on settings."""
+    if enabled:
+        logging.basicConfig(
+            # ADIRX: TODO: consider adding a rotating file handler if log file gets too big, or just keep it simple with one file and manual cleanup
+            level=LOG_LEVEL,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(os.path.join(ROOT_DIR, 'battery_monitor.log')),
+                logging.StreamHandler()
+            ]
+        )
+    else:
+        logging.disable(logging.CRITICAL)
 
 
 def save_config(cfg):
@@ -155,34 +170,20 @@ def save_config(cfg):
         with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, indent=2)
     except Exception as e:
+        logging.error(f"Failed to save config: {e}")
         print("Failed to save config:", e)
-
-
-def send_telegram_async_NOT_SENDING(message, conf=None):
-    """Send telegram message in background if telegram_send is available."""
-    if telegram_send is None:
-        print("telegram_send not installed; message:", message)
-        return
-
-    def _send():
-        try:
-            if conf:
-                telegram_send.send(messages=[message], conf=conf)
-            else:
-                telegram_send.send(messages=[message])
-        except Exception as e:
-            print("Failed to send telegram message:", e)
-
-    threading.Thread(target=_send, daemon=True).start()
 
 
 def send_telegram_async(message, conf=None):
     import asyncio
-    full = f"[{HOSTNAME}] {message}"
-    if conf:
-        asyncio.run(telegram_send.send(messages=[full], conf=conf))
-    else:
-        asyncio.run(telegram_send.send(messages=[full]))
+    try:
+        full = f"[{HOSTNAME}] {message}"
+        if conf:
+            asyncio.run(telegram_send.send(messages=[full], conf=conf))
+        else:
+            asyncio.run(telegram_send.send(messages=[full]))
+    except Exception as e:
+        logging.error(f"Failed to send Telegram message: {e}")
 
 
 class SettingsWindow:
@@ -215,6 +216,9 @@ class SettingsWindow:
         tk.Label(self.root, text="Resend Low-Battery Telegram alert every (minutes)").pack(anchor='w', padx=8, pady=(8, 0))
         self.resend_var = tk.StringVar(value=str(self.config.get('resend_minutes', 5)))
         tk.Entry(self.root, textvariable=self.resend_var).pack(fill='x', padx=8)
+        
+        self.logging_var = tk.BooleanVar(value=bool(self.config.get('logging_enabled')))
+        tk.Checkbutton(self.root, text="Enable logging", variable=self.logging_var).pack(anchor='w', padx=8, pady=(8, 0))
 
         frm = tk.Frame(self.root)
         frm.pack(fill='x', padx=8, pady=10)
@@ -228,6 +232,7 @@ class SettingsWindow:
             self.config['interval'] = int(self.interval_var.get())
             self.config['resend_minutes'] = int(self.resend_var.get())
             self.config['telegram_enabled'] = bool(self.telegram_var.get())
+            self.config['logging_enabled'] = bool(self.logging_var.get())
             conf = self.telegram_conf_var.get().strip()
             self.config['telegram_conf'] = conf if conf else None
             save_config(self.config)
@@ -236,6 +241,7 @@ class SettingsWindow:
             save_message = f"Settings saved to:\n{CONFIG_PATH}"
             messagebox.showinfo("Settings", save_message)
         except Exception as e:
+            logging.error(f"Error saving settings: {e}")
             messagebox.showerror("Error", str(e))
 
     def test_telegram(self):
@@ -253,6 +259,7 @@ class SettingsWindow:
 class TrayMonitor:
     def __init__(self, config=None):
         self.config = config or load_config()
+        setup_logging(self.config.get('logging_enabled', False))
         self._thread = None
         self._stop_event = threading.Event()
         self._last_alert_time = None
@@ -310,9 +317,9 @@ class TrayMonitor:
                 secs = int(time.time() - last)
                 mins = secs // 60
                 s = secs % 60
-                msg += f" — last alert: {mins}m {s}s ago"
-        except Exception:
-            pass
+                msg += f"\nLast alert: {mins}m {s}s ago"
+        except Exception as e:
+            logging.debug(f"Error getting status info: {e}")
         self._notify(msg)
 
     def show_about(self, icon=None, item=None):
@@ -332,7 +339,7 @@ class TrayMonitor:
             title_label.pack(pady=10)
             
             # Description
-            desc_label = tk.Label(about_window, text="Monitors battery status and sends Telegram alerts when low.\nConfigurable threshold, interval, and Telegram integration.", justify=tk.CENTER)
+            desc_label = tk.Label(about_window, text="Monitors battery status and sends Telegram alerts when low.\nConfigurable threshold, interval and Telegram integration.", justify=tk.CENTER)
             desc_label.pack(pady=5)
             
             # Clickable GitHub link
@@ -393,8 +400,12 @@ class TrayMonitor:
     def _get_battery_info(self):
         if not psutil:
             return None
-        bat = psutil.sensors_battery()
-        if bat is None:
+        try:
+            bat = psutil.sensors_battery()
+            if bat is None:
+                return None
+        except Exception as e:
+            logging.error(f"Error getting battery info: {e}")
             return None
         secs = bat.secsleft
         if secs == psutil.POWER_TIME_UNKNOWN or secs == psutil.POWER_TIME_UNLIMITED:
@@ -411,8 +422,8 @@ class TrayMonitor:
             if self.icon and pystray:
                 image = make_icon_image(size=512, percentage=percentage, plugged=plugged)
                 self.icon.icon = image
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"Failed to update icon: {e}")
 
     def _monitor_loop(self):
         icon_update_counter = 0
@@ -437,7 +448,7 @@ class TrayMonitor:
                 if (not plugged) and (percent <= threshold):
                     # Enter low state and send (or resend) low-battery alert
                     if (self._last_alert_time is None) or ((now - self._last_alert_time) >= resend_seconds):
-                        msg = f"🔋 Battery low: {percent}%"
+                        msg = f"🪫 Battery low: {percent}%"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
                         self._notify(msg)
@@ -448,7 +459,7 @@ class TrayMonitor:
                     self._was_low = True
                 else:
                     # not currently low (either plugged or percent > threshold)
-                    if self._was_low and (percent > threshold):
+                    if self._was_low and ((percent > threshold) or plugged):
                         # recovered from low -> notify, include time low
                         duration = None
                         if self._low_start_time is not None:
@@ -459,7 +470,7 @@ class TrayMonitor:
                             dur_text = f"was low for {mins}m {secs}s"
                         else:
                             dur_text = ""
-                        rec_msg = f"✅ Battery recovered on {HOSTNAME}: {percent}%"
+                        rec_msg = f"🔋 Battery recovered: {percent}%"
                         if dur_text:
                             rec_msg += f" — {dur_text}"
                         if self.config.get('telegram_enabled'):
@@ -486,15 +497,15 @@ class TrayMonitor:
             from plyer import notification
             notification.notify(title="Battery Monitor", message=message, timeout=5)
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"Failed to use plyer notification: {e}")
 
         try:
             if self.icon:
                 self.icon.notify(message)
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"Failed to use pystray notification: {e}")
         print(message)
 
 
