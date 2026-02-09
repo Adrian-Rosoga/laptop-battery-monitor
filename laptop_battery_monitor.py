@@ -55,7 +55,7 @@ except Exception as e:
     logging.warning(f"tkinter not available: {e}")
     tk = None
 
-__version__ = "1.2"
+__version__ = "1.4"
 HOSTNAME = socket.gethostname()
 LOG_LEVEL = logging.DEBUG
 #LOG_LEVEL = logging.CRITICAL    # To actually disable logging output, set to CRITICAL and use logging.debug for all log messages in code
