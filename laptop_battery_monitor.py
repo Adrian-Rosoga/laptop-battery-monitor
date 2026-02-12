@@ -331,7 +331,7 @@ class TrayMonitor:
         def _show_about():
             about_window = tk.Tk()
             about_window.title("About")
-            about_window.geometry("400x220")
+            about_window.geometry("400x250")
             about_window.resizable(False, False)
             
             # Title and version
@@ -352,7 +352,7 @@ class TrayMonitor:
             github_link.bind("<Button-1>", lambda e: open_github())
             
             # Credits
-            credits_label = tk.Label(about_window, text="Adrian Rosoga (actually GPT-5 mini and Claude Haiku 4.5)\nFebruary 2026", font=("Arial", 9))
+            credits_label = tk.Label(about_window, text="Adrian Rosoga\n(actually GPT-5 mini and Claude Haiku 4.5)\nFebruary 2026", font=("Arial", 10))
             credits_label.pack(pady=10)
             
             # Close button
@@ -448,7 +448,7 @@ class TrayMonitor:
                 if (not plugged) and (percent <= threshold):
                     # Enter low state and send (or resend) low-battery alert
                     if (self._last_alert_time is None) or ((now - self._last_alert_time) >= resend_seconds):
-                        msg = f"🪫 Battery low: {percent}%"
+                        msg = f"🪫 Battery low: {percent}% ({threshold}%)"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
                         self._notify(msg)
@@ -467,12 +467,12 @@ class TrayMonitor:
                         if duration is not None:
                             mins = duration // 60
                             secs = duration % 60
-                            dur_text = f"was low for {mins}m {secs}s"
+                            dur_text = f"Was low for {mins}m {secs}s"
                         else:
                             dur_text = ""
-                        rec_msg = f"🔋 Battery recovered: {percent}%"
+                        rec_msg = f"🔋 Plugged in and/or battery recovered: {percent}% ({threshold}%)"
                         if dur_text:
-                            rec_msg += f" — {dur_text}"
+                            rec_msg += f"\n{dur_text}"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(rec_msg, conf=self.config.get('telegram_conf'))
                         self._notify(rec_msg)

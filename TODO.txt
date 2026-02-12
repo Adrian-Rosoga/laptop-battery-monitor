@@ -1,0 +1,2 @@
+- Embed the version in the executable to be able to track what runs
+- Option to disable notifications (e.g. on Rafael's computer)

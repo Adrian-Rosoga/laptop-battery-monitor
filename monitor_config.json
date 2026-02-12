@@ -1,8 +1,8 @@
 {
-  "threshold": 52,
+  "threshold": 30,
   "interval": 1,
   "telegram_enabled": true,
-  "telegram_conf": null,
+  "telegram_conf": "C:\\Bin\\telegram-send.conf",
   "logging_enabled": false,
   "resend_minutes": 5,
   "start_minimized": false
