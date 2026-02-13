@@ -238,7 +238,7 @@ class SettingsWindow:
             save_config(self.config)
             if self.on_save:
                 self.on_save(self.config)
-            save_message = f"Settings saved to:\n{CONFIG_PATH}"
+            save_message = f"ℹ️  Settings saved to:\n{CONFIG_PATH}"
             messagebox.showinfo("Settings", save_message)
         except Exception as e:
             logging.error(f"Error saving settings: {e}")
@@ -246,11 +246,11 @@ class SettingsWindow:
 
     def test_telegram(self):
         if not self.config.get('telegram_enabled'):
-            messagebox.showwarning("Telegram", "Telegram is not enabled in settings")
+            messagebox.showwarning("Telegram", "⚠️ Telegram is not enabled in settings")
             return
-        msg = f"Test message"
+        msg = f"ℹ️ Test message"
         send_telegram_async(msg, conf=self.config.get('telegram_conf'))
-        messagebox.showinfo("Telegram", "Test message sent (if configured)")
+        messagebox.showinfo("Telegram", "ℹ️ Test message sent (if configured)")
 
     def close(self):
         self.root.destroy()

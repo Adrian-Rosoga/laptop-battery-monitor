@@ -1,2 +1,39 @@
 - Embed the version in the executable to be able to track what runs
 - Option to disable notifications (e.g. on Rafael's computer)
+
+ICONS = {
+    # Status / Info
+    "info": "ℹ️",
+    "info_blue": "🔵",
+    "info_circle": "ⓘ",
+    "details": "🛈",
+
+    # Success
+    "success": "✅",
+    "ok": "✔️",
+    "green": "🟢",
+
+    # Warning
+    "warning": "⚠️",
+    "alert": "❗",
+    "alert_red": "⛔",
+    "critical": "❗❗",
+
+    # Error / Stop
+    "error": "❌",
+    "stop": "🛑",
+    "halt": "⏹️",
+    "cross": "✖️",
+
+    # Monitoring / Activity
+    "start": "▶️",
+    "pause": "⏸️",
+    "active": "🔄",
+    "stop_monitor": "⏹️",
+
+    # System / Tools
+    "settings": "⚙️",
+    "terminal": "💻",
+    "network": "🌐",
+    "disk": "💾",
+}

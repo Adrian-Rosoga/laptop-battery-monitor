@@ -10,5 +10,6 @@ python -m PyInstaller laptop_battery_monitor.spec --distpath dist --workpath bui
 # Use this to build the standalone executable
 #
 python -m PyInstaller --onefile --noconsole --icon=icon_coco.ico -n laptop_battery_monitor laptop_battery_monitor.py
+copy "C:\Users\Adi\OneDrive\Desktop\# PROJECTS\Laptop Battery Monitor\MyDist\laptop_battery_monitor.exe" "C:\Bin\Run"
 
 Start-Process .\dist\laptop_battery_monitor.exe
