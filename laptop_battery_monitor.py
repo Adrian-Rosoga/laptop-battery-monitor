@@ -293,7 +293,7 @@ class TrayMonitor:
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
         self._running = True
-        self._notify(f"Monitoring started on {HOSTNAME}")
+        self._notify(f"▶️ Battery monitoring started on {HOSTNAME}")
 
     def stop_monitoring(self, icon=None, item=None):
         if not self._running:
@@ -302,7 +302,7 @@ class TrayMonitor:
         if self._thread:
             self._thread.join(timeout=2)
         self._running = False
-        self._notify(f"Battery monitoring stopped")
+        self._notify(f"⏹️ Battery monitoring stopped on {HOSTNAME}")
 
     def show_status(self, icon=None, item=None):
         status = "Running" if self._running else "Stopped"
@@ -380,10 +380,30 @@ class TrayMonitor:
     def exit(self, icon=None, item=None):
         self.stop_monitoring()
         
+        # Get battery info before stopping
+        info = self._get_battery_info()
+
+        threshold = int(cfg.get('threshold', 20))
+        
         # Send exit Telegram message if enabled
         if self.config.get('telegram_enabled'):
-            exit_msg = f"⏹️ Monitoring stopped on {HOSTNAME}"
-            send_telegram_async(exit_msg, conf=self.config.get('telegram_conf'))
+            if info:
+                exit_msg = f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'plugged' if info['plugged'] else 'unplugged'}"
+            else:
+                exit_msg = "⏹️ Battery monitoring stopped"
+            try:
+                send_telegram_async(exit_msg, conf=self.config.get('telegram_conf'))
+                time.sleep(2.0)  # Give Telegram time to send
+            except Exception as e:
+                logging.error(f"Failed to send exit Telegram message: {e}")
+        
+        # Send exit notification
+        if info:
+            self._notify(f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'plugged' if info['plugged'] else 'unplugged'}")
+        else:
+            self._notify("⏹️ Battery monitoring stopped")
+        
+        time.sleep(1.0)  # Give notification time to display
         
         if self.icon:
             self.icon.stop()
@@ -517,7 +537,12 @@ if __name__ == '__main__':
     
     # Send startup Telegram message if enabled
     if cfg.get('telegram_enabled'):
-        startup_msg = f"▶️ Battery monitoring started"
+        info = monitor._get_battery_info()
+        threshold = int(cfg.get('threshold', 20))
+        if info:
+            startup_msg = f"▶️ Battery monitoring started — {info['percent']}% ({threshold}% {'- plugged' if info['plugged'] else '- unplugged'})"
+        else:
+            startup_msg = f"▶️ Battery monitoring started"
         send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
     
     monitor.run()
