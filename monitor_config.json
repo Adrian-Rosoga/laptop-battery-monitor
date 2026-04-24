@@ -2,8 +2,10 @@
   "threshold": 30,
   "interval": 1,
   "telegram_enabled": true,
-  "telegram_conf": "C:\\Bin\\telegram-send.conf",
-  "logging_enabled": false,
+  "telegram_conf": "C:\\Bin\\Run\\telegram-send.conf",
+  "logging_enabled": true,
+  "data_log_interval": 60,
+  "data_log_retention_days": 30,
   "resend_minutes": 5,
   "start_minimized": false
 }

@@ -28,6 +28,8 @@ import sys
 import os
 import json
 import logging
+import csv
+import datetime
 
 try:
     import psutil
@@ -55,7 +57,17 @@ except Exception as e:
     logging.warning(f"tkinter not available: {e}")
     tk = None
 
-__version__ = "1.4"
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.patches import Patch
+except Exception as e:
+    logging.warning(f"matplotlib not available: {e}")
+    plt = None
+
+__version__ = "1.5"
 HOSTNAME = socket.gethostname()
 LOG_LEVEL = logging.DEBUG
 #LOG_LEVEL = logging.CRITICAL    # To actually disable logging output, set to CRITICAL and use logging.debug for all log messages in code
@@ -69,6 +81,7 @@ else:
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
+CSV_LOG_DIR = ROOT_DIR   # daily CSV files are written here
 
 
 def make_icon_image(size=128, color1=(0, 122, 204), color2=(255, 255, 255), percentage=None, plugged=False):
@@ -134,7 +147,9 @@ DEFAULT_CONFIG = {
     "interval": 1,
     "telegram_enabled": False,
     "telegram_conf": None,
-    "logging_enabled": False
+    "logging_enabled": False,
+    "data_log_interval": 60,
+    "data_log_retention_days": 30,
 }
 DEFAULT_CONFIG["resend_minutes"] = 5
 
@@ -158,9 +173,12 @@ def setup_logging(enabled):
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(os.path.join(ROOT_DIR, 'battery_monitor.log')),
-                logging.StreamHandler()
+                logging.StreamHandler(stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False))
             ]
         )
+        # Suppress verbose third-party debug logs
+        for noisy in ('matplotlib', 'telegram', 'httpcore', 'httpx', 'PIL'):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
     else:
         logging.disable(logging.CRITICAL)
 
@@ -174,12 +192,23 @@ def save_config(cfg):
         print("Failed to save config:", e)
 
 
+def _resolve_telegram_conf(conf=None):
+    """Return conf path to use: explicit conf, or fallback to telegram-send.conf in ROOT_DIR."""
+    if conf:
+        return conf
+    local_conf = os.path.join(ROOT_DIR, 'telegram-send.conf')
+    if os.path.isfile(local_conf):
+        return local_conf
+    return None
+
+
 def send_telegram_async(message, conf=None):
     import asyncio
     try:
         full = f"[{HOSTNAME}] {message}"
-        if conf:
-            asyncio.run(telegram_send.send(messages=[full], conf=conf))
+        resolved = _resolve_telegram_conf(conf)
+        if resolved:
+            asyncio.run(telegram_send.send(messages=[full], conf=resolved))
         else:
             asyncio.run(telegram_send.send(messages=[full]))
     except Exception as e:
@@ -196,7 +225,7 @@ class SettingsWindow:
 
         self.root = tk.Tk()
         self.root.title("Battery Monitor Settings")
-        self.root.geometry("320x300")
+        self.root.geometry("320x400")
 
         tk.Label(self.root, text="Low battery threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
         self.threshold_var = tk.StringVar(value=str(self.config.get('threshold', 20)))
@@ -213,10 +242,18 @@ class SettingsWindow:
         self.telegram_conf_var = tk.StringVar(value=str(self.config.get('telegram_conf') or ""))
         tk.Entry(self.root, textvariable=self.telegram_conf_var).pack(fill='x', padx=8)
         
-        tk.Label(self.root, text="Resend Low-Battery Telegram alert every (minutes)").pack(anchor='w', padx=8, pady=(8, 0))
+        tk.Label(self.root, text="Send Low-Battery Telegram alert every (minutes)").pack(anchor='w', padx=8, pady=(8, 0))
         self.resend_var = tk.StringVar(value=str(self.config.get('resend_minutes', 5)))
         tk.Entry(self.root, textvariable=self.resend_var).pack(fill='x', padx=8)
-        
+
+        tk.Label(self.root, text="Data log interval (s)").pack(anchor='w', padx=8, pady=(8, 0))
+        self.data_log_interval_var = tk.StringVar(value=str(self.config.get('data_log_interval', 60)))
+        tk.Entry(self.root, textvariable=self.data_log_interval_var).pack(fill='x', padx=8)
+
+        tk.Label(self.root, text="Data log retention (days)").pack(anchor='w', padx=8, pady=(8, 0))
+        self.data_log_retention_var = tk.StringVar(value=str(self.config.get('data_log_retention_days', 30)))
+        tk.Entry(self.root, textvariable=self.data_log_retention_var).pack(fill='x', padx=8)
+
         self.logging_var = tk.BooleanVar(value=bool(self.config.get('logging_enabled')))
         tk.Checkbutton(self.root, text="Enable logging", variable=self.logging_var).pack(anchor='w', padx=8, pady=(8, 0))
 
@@ -231,6 +268,8 @@ class SettingsWindow:
             self.config['threshold'] = int(self.threshold_var.get())
             self.config['interval'] = int(self.interval_var.get())
             self.config['resend_minutes'] = int(self.resend_var.get())
+            self.config['data_log_interval'] = int(self.data_log_interval_var.get())
+            self.config['data_log_retention_days'] = int(self.data_log_retention_var.get())
             self.config['telegram_enabled'] = bool(self.telegram_var.get())
             self.config['logging_enabled'] = bool(self.logging_var.get())
             conf = self.telegram_conf_var.get().strip()
@@ -266,6 +305,8 @@ class TrayMonitor:
         self._low_start_time = None
         self._was_low = False
         self._running = False
+        self._last_csv_time = None
+        self._current_day = None
 
         self.icon = None
         if pystray:
@@ -273,11 +314,12 @@ class TrayMonitor:
             menu = pystray.Menu(
                 pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._running),
                 pystray.MenuItem('Show Status', self.show_status),
+                pystray.MenuItem('Show Graph', self.show_graph),
                 pystray.MenuItem('Settings', self.open_settings),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
             )
-            self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Battery Monitor: {HOSTNAME}", menu)
+            self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Battery Monitor v{__version__}: {HOSTNAME}", menu)
 
     def toggle_monitoring(self, icon=None, item=None):
         """Toggle monitoring on/off."""
@@ -294,6 +336,12 @@ class TrayMonitor:
         self._thread.start()
         self._running = True
         self._notify(f"▶️ Battery monitoring started on {HOSTNAME}")
+        # Rotate old CSV logs and generate yesterday's and today's graph on startup
+        threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        threading.Thread(target=self._generate_and_send_graph, args=(yesterday,), daemon=True).start()
+        today = datetime.date.today().strftime('%Y-%m-%d')
+        threading.Thread(target=self._generate_and_send_graph, args=(today,), daemon=True).start()
 
     def stop_monitoring(self, icon=None, item=None):
         if not self._running:
@@ -309,7 +357,7 @@ class TrayMonitor:
         info = self._get_battery_info() if psutil else None
         msg = f"{HOSTNAME}: {status}"
         if info:
-            msg += f" — Battery {info['percent']}% {'(plugged)' if info['plugged'] else ''}"
+            msg += f" — Battery {info['percent']}% {'(Plugged)' if info['plugged'] else ''}"
         # include time since last low-battery alert if available
         try:
             last = self._last_alert_time
@@ -363,6 +411,44 @@ class TrayMonitor:
         
         threading.Thread(target=_show_about, daemon=True).start()
 
+    def show_graph(self, icon=None, item=None):
+        """Show the battery graph for today in a fullscreen-width popup."""
+        if tk is None:
+            self._notify("tkinter not available; cannot show graph.")
+            return
+
+        def _show():
+            date_str = datetime.date.today().strftime('%Y-%m-%d')
+            graph_path = self._generate_graph(date_str)
+            if not graph_path or not os.path.exists(graph_path):
+                self._notify("No graph data available for today.")
+                return
+
+            from PIL import Image as PilImage, ImageTk
+            img = PilImage.open(graph_path)
+            screen_w = None
+
+            win = tk.Tk()
+            win.title(f"Battery Graph — {date_str}")
+            win.attributes("-topmost", True)
+
+            screen_w = win.winfo_screenwidth()
+            orig_w, orig_h = img.size
+            new_h = int(orig_h * screen_w / orig_w)
+            img = img.resize((screen_w, new_h), PilImage.LANCZOS)
+
+            photo = ImageTk.PhotoImage(img, master=win)
+            label = tk.Label(win, image=photo, bd=0)
+            label.image = photo
+            label.pack()
+
+            win.resizable(False, False)
+            win.bind("<Escape>", lambda e: win.destroy())
+            win.focus_force()
+            win.mainloop()
+
+        threading.Thread(target=_show, daemon=True).start()
+
     def open_settings(self, icon=None, item=None):
         if tk is None:
             self._notify("tkinter not available; cannot open settings.")
@@ -388,7 +474,7 @@ class TrayMonitor:
         # Send exit Telegram message if enabled
         if self.config.get('telegram_enabled'):
             if info:
-                exit_msg = f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'plugged' if info['plugged'] else 'unplugged'}"
+                exit_msg = f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}"
             else:
                 exit_msg = "⏹️ Battery monitoring stopped"
             try:
@@ -399,7 +485,7 @@ class TrayMonitor:
         
         # Send exit notification
         if info:
-            self._notify(f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'plugged' if info['plugged'] else 'unplugged'}")
+            self._notify(f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}")
         else:
             self._notify("⏹️ Battery monitoring stopped")
         
@@ -445,6 +531,145 @@ class TrayMonitor:
         except Exception as e:
             logging.debug(f"Failed to update icon: {e}")
 
+    def _rotate_csv_logs(self):
+        """Delete daily CSV files older than data_log_retention_days."""
+        retention = int(self.config.get('data_log_retention_days', 30))
+        cutoff = datetime.date.today() - datetime.timedelta(days=retention)
+        try:
+            for fname in os.listdir(CSV_LOG_DIR):
+                if fname.startswith('battery_log_') and fname.endswith('.csv'):
+                    date_part = fname[len('battery_log_'):-len('.csv')]
+                    try:
+                        file_date = datetime.date.fromisoformat(date_part)
+                    except ValueError:
+                        continue
+                    if file_date < cutoff:
+                        fpath = os.path.join(CSV_LOG_DIR, fname)
+                        os.remove(fpath)
+                        logging.info(f"Rotated old CSV log: {fname}")
+        except Exception as e:
+            logging.error(f"Failed to rotate CSV logs: {e}")
+
+    def _write_csv_row(self, timestamp, battery_percent, cpu_percent, charging):
+        """Append a data row to today's dated CSV file, writing the header on first creation."""
+        date_str = timestamp[:10]  # 'YYYY-MM-DD'
+        csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
+        file_exists = os.path.isfile(csv_path)
+        try:
+            with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(['timestamp', 'battery_percent', 'cpu_percent', 'charging'])
+                writer.writerow([timestamp, battery_percent, cpu_percent, charging])
+        except Exception as e:
+            logging.error(f"Failed to write CSV log: {e}")
+
+    def _generate_graph(self, date_str):
+        """Generate a daily PNG graph for the given date (YYYY-MM-DD). Returns path or None."""
+        if plt is None:
+            logging.warning("matplotlib not available; skipping graph generation")
+            return None
+        csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
+        rows = []
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    rows.append(row)
+        except FileNotFoundError:
+            logging.info(f"No CSV file for {date_str}, skipping graph")
+            return None
+        except Exception as e:
+            logging.error(f"Failed to read CSV for graph: {e}")
+            return None
+        if not rows:
+            logging.info(f"No CSV data for {date_str}, skipping graph")
+            return None
+        try:
+            times = [datetime.datetime.strptime(r['timestamp'], '%Y-%m-%d %H:%M:%S') for r in rows]
+            battery = [float(r['battery_percent']) for r in rows]
+            cpu = [float(r['cpu_percent']) for r in rows]
+            charging = [str(r.get('charging', 'false')).strip().lower() in ('true', '1', 'yes') for r in rows]
+
+            # Insert NaN breaks where the gap between consecutive points exceeds
+            # 2× the data_log_interval (computer was likely asleep or stopped).
+            gap_threshold_s = int(self.config.get('data_log_interval', 60)) * 2
+            import math
+            plot_times, plot_battery, plot_cpu = [], [], []
+            for i in range(len(times)):
+                plot_times.append(times[i])
+                plot_battery.append(battery[i])
+                plot_cpu.append(cpu[i])
+                if i + 1 < len(times):
+                    gap = (times[i + 1] - times[i]).total_seconds()
+                    if gap > gap_threshold_s:
+                        plot_times.append(times[i] + datetime.timedelta(seconds=gap / 2))
+                        plot_battery.append(math.nan)
+                        plot_cpu.append(math.nan)
+
+            fig, ax = plt.subplots(figsize=(14, 5))
+
+            # Shade background: light yellow for discharging, light green for charging
+            ax.set_facecolor('#fffde7')
+            for i, ch in enumerate(charging):
+                if ch:
+                    t_start = times[i]
+                    t_end = times[i + 1] if i + 1 < len(times) else times[i]
+                    ax.axvspan(t_start, t_end, alpha=0.09, color='green')
+
+            ax.plot(plot_times, plot_battery, label='Battery %', color='steelblue', linewidth=3.0)
+            ax.plot(plot_times, plot_cpu, label='CPU %', color='tomato', linewidth=1.2, alpha=0.85)
+            ax.set_ylim(0, 105)
+            ax.set_ylabel('Percent (%)')
+            ax.set_xlabel('Time')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+            fig.autofmt_xdate()
+            legend_elements = [
+                plt.Line2D([0], [0], color='steelblue', linewidth=3.0, label='Battery %'),
+                plt.Line2D([0], [0], color='tomato', linewidth=1.2, label='CPU %'),
+                Patch(facecolor='#fffde7', edgecolor='gray', alpha=0.9, label='Discharging'),
+                Patch(facecolor='green', alpha=0.35, label='Charging'),
+            ]
+            ax.legend(handles=legend_elements, loc='upper right')
+            ax.set_title(f'Battery & CPU — {date_str} — {HOSTNAME}')
+            ax.grid(True, axis='y', alpha=0.3)
+            ax.grid(True, axis='x', alpha=0.07)
+            fig.tight_layout()
+
+            graph_path = os.path.join(ROOT_DIR, f'battery_log_{date_str}.png')
+            fig.savefig(graph_path, dpi=100)
+            plt.close(fig)
+            return graph_path
+        except Exception as e:
+            logging.error(f"Failed to generate graph for {date_str}: {e}")
+            return None
+
+    def _send_graph_telegram(self, graph_path, date_str):
+        """Send the daily graph image via Telegram."""
+        if not self.config.get('telegram_enabled'):
+            return
+        if not graph_path or not os.path.isfile(graph_path):
+            return
+        import asyncio
+        caption = f"📊 Daily battery & CPU report for {date_str} — {HOSTNAME}"
+        conf = _resolve_telegram_conf(self.config.get('telegram_conf'))
+        try:
+            async def _send():
+                with open(graph_path, 'rb') as f:
+                    if conf:
+                        await telegram_send.send(images=[f], captions=[caption], conf=conf)
+                    else:
+                        await telegram_send.send(images=[f], captions=[caption])
+            asyncio.run(_send())
+        except Exception as e:
+            logging.error(f"Failed to send graph via Telegram: {e}")
+
+    def _generate_and_send_graph(self, date_str):
+        """Generate the daily graph and send it via Telegram."""
+        graph_path = self._generate_graph(date_str)
+        if graph_path:
+            self._send_graph_telegram(graph_path, date_str)
+
     def _monitor_loop(self):
         icon_update_counter = 0
         while not self._stop_event.is_set():
@@ -461,7 +686,26 @@ class TrayMonitor:
                 percent = info['percent']
                 plugged = info['plugged']
                 now = time.time()
-                
+
+                # Midnight rollover detection — generate graph for completed day
+                today = datetime.date.today()
+                if self._current_day is not None and today != self._current_day:
+                    completed_day = self._current_day.strftime('%Y-%m-%d')
+                    threading.Thread(target=self._generate_and_send_graph, args=(completed_day,), daemon=True).start()
+                    threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
+                self._current_day = today
+
+                # CSV logging
+                data_log_interval = int(self.config.get('data_log_interval', 60))
+                if (self._last_csv_time is None) or ((now - self._last_csv_time) >= data_log_interval):
+                    # Use interval=1 on the first call so psutil has a real time window to measure;
+                    # interval=None on subsequent calls uses the delta from the previous call.
+                    cpu_interval = 1 if self._last_csv_time is None else None
+                    cpu_percent = psutil.cpu_percent(interval=cpu_interval) if psutil else 0.0
+                    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self._write_csv_row(timestamp, percent, cpu_percent, plugged)
+                    self._last_csv_time = now
+
                 # Update icon with battery percentage and charging status
                 self._update_icon(percent, plugged=plugged)
                 
@@ -540,7 +784,7 @@ if __name__ == '__main__':
         info = monitor._get_battery_info()
         threshold = int(cfg.get('threshold', 20))
         if info:
-            startup_msg = f"▶️ Battery monitoring started — {info['percent']}% ({threshold}% {'- plugged' if info['plugged'] else '- unplugged'})"
+            startup_msg = f"▶️ Battery monitoring started — {info['percent']}% ({threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
         else:
             startup_msg = f"▶️ Battery monitoring started"
         send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))

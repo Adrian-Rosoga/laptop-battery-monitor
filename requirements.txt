@@ -4,3 +4,4 @@ psutil
 telegram-send
 plyer
 tkinter
+matplotlib
