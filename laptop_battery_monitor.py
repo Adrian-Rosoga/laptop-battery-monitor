@@ -164,17 +164,25 @@ def load_config():
     return dict(DEFAULT_CONFIG)
 
 
-def setup_logging(enabled):
-    """Configure logging based on settings."""
+def setup_logging(enabled, date_str=None):
+    """Configure logging based on settings. Safe to call multiple times (e.g. at midnight)."""
     if enabled:
+        if date_str is None:
+            date_str = datetime.date.today().strftime('%Y-%m-%d')
+        log_filename = f'battery_monitor_{date_str}.log'
+        handlers = [logging.FileHandler(os.path.join(ROOT_DIR, log_filename))]
+        if sys.stdout is not None:
+            try:
+                handlers.append(
+                    logging.StreamHandler(stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False))
+                )
+            except Exception:
+                pass
         logging.basicConfig(
-            # ADIRX: TODO: consider adding a rotating file handler if log file gets too big, or just keep it simple with one file and manual cleanup
+            force=True,
             level=LOG_LEVEL,
             format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(os.path.join(ROOT_DIR, 'battery_monitor.log')),
-                logging.StreamHandler(stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False))
-            ]
+            handlers=handlers
         )
         # Suppress verbose third-party debug logs
         for noisy in ('matplotlib', 'telegram', 'httpcore', 'httpx', 'PIL'):
@@ -532,23 +540,30 @@ class TrayMonitor:
             logging.debug(f"Failed to update icon: {e}")
 
     def _rotate_csv_logs(self):
-        """Delete daily CSV files older than data_log_retention_days."""
+        """Delete daily CSV and log files older than data_log_retention_days."""
         retention = int(self.config.get('data_log_retention_days', 30))
         cutoff = datetime.date.today() - datetime.timedelta(days=retention)
         try:
             for fname in os.listdir(CSV_LOG_DIR):
                 if fname.startswith('battery_log_') and fname.endswith('.csv'):
                     date_part = fname[len('battery_log_'):-len('.csv')]
+                elif fname.startswith('battery_monitor_') and fname.endswith('.log'):
+                    date_part = fname[len('battery_monitor_'):-len('.log')]
+                else:
+                    continue
+                try:
+                    file_date = datetime.date.fromisoformat(date_part)
+                except ValueError:
+                    continue
+                if file_date < cutoff:
+                    fpath = os.path.join(CSV_LOG_DIR, fname)
                     try:
-                        file_date = datetime.date.fromisoformat(date_part)
-                    except ValueError:
-                        continue
-                    if file_date < cutoff:
-                        fpath = os.path.join(CSV_LOG_DIR, fname)
                         os.remove(fpath)
-                        logging.info(f"Rotated old CSV log: {fname}")
+                        logging.info(f"Rotated old file: {fname}")
+                    except Exception as e:
+                        logging.warning(f"Could not remove {fname}: {e}")
         except Exception as e:
-            logging.error(f"Failed to rotate CSV logs: {e}")
+            logging.error(f"Failed to rotate logs: {e}")
 
     def _write_csv_row(self, timestamp, battery_percent, cpu_percent, charging):
         """Append a data row to today's dated CSV file, writing the header on first creation."""
@@ -693,6 +708,7 @@ class TrayMonitor:
                     completed_day = self._current_day.strftime('%Y-%m-%d')
                     threading.Thread(target=self._generate_and_send_graph, args=(completed_day,), daemon=True).start()
                     threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
+                    setup_logging(self.config.get('logging_enabled', False))
                 self._current_day = today
 
                 # CSV logging
@@ -784,9 +800,9 @@ if __name__ == '__main__':
         info = monitor._get_battery_info()
         threshold = int(cfg.get('threshold', 20))
         if info:
-            startup_msg = f"▶️ Battery monitoring started — {info['percent']}% ({threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
+            startup_msg = f"▶️ Battery Monitor v{__version__}. Started — {info['percent']}% ({threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
         else:
-            startup_msg = f"▶️ Battery monitoring started"
+            startup_msg = f"▶️ Battery Monitor v{__version__}. Started"
         send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
     
     monitor.run()
