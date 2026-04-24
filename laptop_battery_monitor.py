@@ -59,6 +59,7 @@ except Exception as e:
 
 try:
     import matplotlib
+    import matplotlib.figure
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
@@ -315,6 +316,7 @@ class TrayMonitor:
         self._running = False
         self._last_csv_time = None
         self._current_day = None
+        self._open_windows = []  # track open tkinter windows for clean exit
 
         self.icon = None
         if pystray:
@@ -420,40 +422,131 @@ class TrayMonitor:
         threading.Thread(target=_show_about, daemon=True).start()
 
     def show_graph(self, icon=None, item=None):
-        """Show the battery graph for today in a fullscreen-width popup."""
+        """Show the battery graph for today in an interactive popup with zoom/pan and cursor values."""
         if tk is None:
             self._notify("tkinter not available; cannot show graph.")
             return
 
         def _show():
+            import math
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
             date_str = datetime.date.today().strftime('%Y-%m-%d')
-            graph_path = self._generate_graph(date_str)
-            if not graph_path or not os.path.exists(graph_path):
+            csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
+            logging.info(f"Show Graph: using data file {csv_path}")
+
+            result = self._build_graph_figure(date_str)
+            if result is None:
                 self._notify("No graph data available for today.")
                 return
-
-            from PIL import Image as PilImage, ImageTk
-            img = PilImage.open(graph_path)
-            screen_w = None
+            fig, ax, plot_times, plot_battery, plot_cpu = result
 
             win = tk.Tk()
-            win.title(f"Battery Graph — {date_str}")
+            self._open_windows.append(win)
+            win.title(f"Battery Graph \u2014 {date_str}")
             win.attributes("-topmost", True)
 
+            # Resize figure to screen width
             screen_w = win.winfo_screenwidth()
-            orig_w, orig_h = img.size
-            new_h = int(orig_h * screen_w / orig_w)
-            img = img.resize((screen_w, new_h), PilImage.LANCZOS)
+            dpi = fig.dpi
+            fig.set_size_inches(screen_w / dpi, fig.get_size_inches()[1])
+            fig.tight_layout()
 
-            photo = ImageTk.PhotoImage(img, master=win)
-            label = tk.Label(win, image=photo, bd=0)
-            label.image = photo
-            label.pack()
+            canvas = FigureCanvasTkAgg(fig, master=win)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-            win.resizable(False, False)
-            win.bind("<Escape>", lambda e: win.destroy())
+            toolbar = NavigationToolbar2Tk(canvas, win)
+            toolbar.update()
+            # Suppress the default "(x, y)" coordinate display in the toolbar
+            toolbar.set_message = lambda msg: None
+
+            # Status bar showing nearest data point values under cursor
+            status_var = tk.StringVar(value="  Move cursor over graph to see values")
+            status_bar = tk.Label(win, textvariable=status_var, anchor='w',
+                                  relief=tk.SUNKEN, font=("Courier", 14, "bold"), padx=6)
+            status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+            # Pre-build list of valid (non-NaN) points for nearest-point lookup
+            valid_points = [
+                (pt, plot_battery[i], plot_cpu[i])
+                for i, pt in enumerate(plot_times)
+                if not (isinstance(plot_battery[i], float) and math.isnan(plot_battery[i]))
+            ]
+
+            def on_motion(event):
+                if event.inaxes != ax or event.xdata is None:
+                    status_var.set("  Move cursor over graph to see values")
+                    return
+                t = mdates.num2date(event.xdata).replace(tzinfo=None)
+                if not valid_points:
+                    return
+                pt, bat, cpu = min(valid_points, key=lambda x: abs((x[0] - t).total_seconds()))
+                status_var.set(
+                    f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%"
+                )
+
+            canvas.mpl_connect('motion_notify_event', on_motion)
+
+            def _close():
+                if win in self._open_windows:
+                    self._open_windows.remove(win)
+                win.quit()  # exits mainloop; Tcl interpreter stays alive until win.destroy()
+
+            win.protocol("WM_DELETE_WINDOW", _close)
+            win.bind("<Escape>", lambda e: _close())
             win.focus_force()
             win.mainloop()
+
+            # mainloop has returned — we're still on this thread with the Tcl interpreter alive.
+            # We must finalize ALL tkinter-linked objects (BooleanVar, StringVar, Image, etc.)
+            # HERE, on this thread, BEFORE win.destroy() kills the interpreter.
+            # Otherwise Python's cyclic GC may call Variable.__del__ later on a different
+            # thread → "RuntimeError: main thread is not in main loop".
+            import gc
+
+            # 1. Patch filter_destroy to a no-op BEFORE nulling canvas.figure.
+            #    filter_destroy (bound to the canvas widget's <Destroy> event by matplotlib)
+            #    accesses canvas.figure._canvas_callbacks — if canvas.figure is already None
+            #    it raises AttributeError.  Replacing the method on the instance means it
+            #    can never crash regardless of when the <Destroy> event fires.
+            try:
+                canvas.filter_destroy = lambda event: None
+            except Exception:
+                pass
+            try:
+                canvas.get_tk_widget().unbind('<Destroy>')
+            except Exception:
+                pass
+
+            # 2. Break circular references so CPython ref-counting can immediately collect:
+            #    fig.canvas ↔ canvas.figure  and  toolbar.canvas ↔ canvas.toolbar
+            for obj, attr in [(fig, 'canvas'), (canvas, 'toolbar'), (canvas, 'figure')]:
+                try:
+                    setattr(obj, attr, None)
+                except Exception:
+                    pass
+
+            # 2. Destroy the toolbar widget — releases Tcl-side BooleanVar/Image resources
+            #    so the Tcl interpreter no longer holds them.
+            try:
+                toolbar.destroy()
+            except Exception:
+                pass
+
+            # 3. Drop all local Python references; with cycles broken, CPython's ref-counting
+            #    finalizes Variable.__del__ immediately on this thread.
+            try:
+                del status_bar, status_var, toolbar, canvas, fig, ax
+                del valid_points, plot_times, plot_battery, plot_cpu
+            except Exception:
+                pass
+
+            # 4. One GC pass to catch anything ref-counting missed.
+            gc.collect()
+
+            # 5. Now it's safe to destroy the interpreter — no live Python objects reference it.
+            win.destroy()
 
         threading.Thread(target=_show, daemon=True).start()
 
@@ -464,7 +557,10 @@ class TrayMonitor:
         # open settings window in a separate thread so pystray loop isn't blocked
         def _open():
             win = SettingsWindow(None, self.config, on_save=self._on_config_save)
+            self._open_windows.append(win.root)
             win.root.mainloop()
+            if win.root in self._open_windows:
+                self._open_windows.remove(win.root)
 
         threading.Thread(target=_open, daemon=True).start()
 
@@ -473,13 +569,18 @@ class TrayMonitor:
 
     def exit(self, icon=None, item=None):
         self.stop_monitoring()
+        # Close any open tkinter windows cleanly to avoid GC errors on daemon threads
+        for win in list(self._open_windows):
+            try:
+                win.after(0, win.quit)  # quit exits mainloop; thread then does its own destroy
+            except Exception:
+                pass
+        self._open_windows.clear()
         
         # Get battery info before stopping
         info = self._get_battery_info()
 
-        threshold = int(cfg.get('threshold', 20))
-        
-        # Send exit Telegram message if enabled
+        threshold = int(self.config.get('threshold', 20))
         if self.config.get('telegram_enabled'):
             if info:
                 exit_msg = f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}"
@@ -579,8 +680,8 @@ class TrayMonitor:
         except Exception as e:
             logging.error(f"Failed to write CSV log: {e}")
 
-    def _generate_graph(self, date_str):
-        """Generate a daily PNG graph for the given date (YYYY-MM-DD). Returns path or None."""
+    def _build_graph_figure(self, date_str):
+        """Load CSV data and build a matplotlib figure. Returns (fig, ax, plot_times, plot_battery, plot_cpu) or None."""
         if plt is None:
             logging.warning("matplotlib not available; skipping graph generation")
             return None
@@ -601,6 +702,7 @@ class TrayMonitor:
             logging.info(f"No CSV data for {date_str}, skipping graph")
             return None
         try:
+            import math
             times = [datetime.datetime.strptime(r['timestamp'], '%Y-%m-%d %H:%M:%S') for r in rows]
             battery = [float(r['battery_percent']) for r in rows]
             cpu = [float(r['cpu_percent']) for r in rows]
@@ -609,7 +711,6 @@ class TrayMonitor:
             # Insert NaN breaks where the gap between consecutive points exceeds
             # 2× the data_log_interval (computer was likely asleep or stopped).
             gap_threshold_s = int(self.config.get('data_log_interval', 60)) * 2
-            import math
             plot_times, plot_battery, plot_cpu = [], [], []
             for i in range(len(times)):
                 plot_times.append(times[i])
@@ -622,14 +723,21 @@ class TrayMonitor:
                         plot_battery.append(math.nan)
                         plot_cpu.append(math.nan)
 
-            fig, ax = plt.subplots(figsize=(14, 5))
+            fig = matplotlib.figure.Figure(figsize=(14, 5))
+            ax = fig.add_subplot(1, 1, 1)
 
             # Shade background: light yellow for discharging, light green for charging
             ax.set_facecolor('#fffde7')
             for i, ch in enumerate(charging):
                 if ch:
                     t_start = times[i]
-                    t_end = times[i + 1] if i + 1 < len(times) else times[i]
+                    if i + 1 < len(times):
+                        gap = (times[i + 1] - times[i]).total_seconds()
+                        if gap > gap_threshold_s:
+                            continue  # sleep/stop gap — don't draw misleading span
+                        t_end = times[i + 1]
+                    else:
+                        t_end = times[i]
                     ax.axvspan(t_start, t_end, alpha=0.09, color='green')
 
             ax.plot(plot_times, plot_battery, label='Battery %', color='steelblue', linewidth=3.0)
@@ -650,14 +758,26 @@ class TrayMonitor:
             ax.grid(True, axis='y', alpha=0.3)
             ax.grid(True, axis='x', alpha=0.07)
             fig.tight_layout()
+            return fig, ax, plot_times, plot_battery, plot_cpu
+        except Exception as e:
+            logging.error(f"Failed to build graph figure for {date_str}: {e}")
+            return None
 
+    def _generate_graph(self, date_str):
+        """Generate a daily PNG graph for the given date (YYYY-MM-DD). Returns path or None."""
+        result = self._build_graph_figure(date_str)
+        if result is None:
+            return None
+        fig, ax, plot_times, plot_battery, plot_cpu = result
+        try:
             graph_path = os.path.join(ROOT_DIR, f'battery_log_{date_str}.png')
             fig.savefig(graph_path, dpi=100)
-            plt.close(fig)
             return graph_path
         except Exception as e:
-            logging.error(f"Failed to generate graph for {date_str}: {e}")
+            logging.error(f"Failed to save graph for {date_str}: {e}")
             return None
+        finally:
+            fig.clf()
 
     def _send_graph_telegram(self, graph_path, date_str):
         """Send the daily graph image via Telegram."""
