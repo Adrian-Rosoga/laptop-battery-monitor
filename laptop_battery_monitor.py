@@ -30,6 +30,8 @@ import json
 import logging
 import csv
 import datetime
+import ctypes
+import ctypes.wintypes as _wt
 
 try:
     import psutil
@@ -68,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "1.7"
+__version__ = "1.8"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 10
 #LOG_LEVEL = logging.DEBUG
@@ -87,61 +89,177 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
 CSV_LOG_DIR = ROOT_DIR   # daily CSV files are written here
 
 
+def _get_wifi_dbm():
+    """Return current WiFi signal as (dbm, pct) or (None, None) if unavailable.
+
+    Uses the Windows Native WiFi API (wlanapi.dll) via ctypes to read RSSI
+    directly from the NIC driver.  This does NOT spawn netsh and does NOT
+    touch the Windows Location Services API, so the 'Location in use' tray
+    icon never appears.
+    """
+    try:
+        class _GUID(ctypes.Structure):
+            _fields_ = [('Data1', ctypes.c_ulong), ('Data2', ctypes.c_ushort),
+                        ('Data3', ctypes.c_ushort), ('Data4', ctypes.c_ubyte * 8)]
+
+        wlan = ctypes.WinDLL('wlanapi.dll')
+        wlan.WlanOpenHandle.restype      = _wt.DWORD
+        wlan.WlanOpenHandle.argtypes     = [_wt.DWORD, ctypes.c_void_p,
+                                            ctypes.POINTER(_wt.DWORD),
+                                            ctypes.POINTER(_wt.HANDLE)]
+        wlan.WlanEnumInterfaces.restype  = _wt.DWORD
+        wlan.WlanEnumInterfaces.argtypes = [_wt.HANDLE, ctypes.c_void_p,
+                                            ctypes.POINTER(ctypes.c_void_p)]
+        wlan.WlanQueryInterface.restype  = _wt.DWORD
+        wlan.WlanQueryInterface.argtypes = [_wt.HANDLE, ctypes.POINTER(_GUID),
+                                            ctypes.c_uint, ctypes.c_void_p,
+                                            ctypes.POINTER(_wt.DWORD),
+                                            ctypes.POINTER(ctypes.c_void_p),
+                                            ctypes.POINTER(ctypes.c_uint)]
+        wlan.WlanFreeMemory.restype      = None
+        wlan.WlanFreeMemory.argtypes     = [ctypes.c_void_p]
+        wlan.WlanCloseHandle.restype     = _wt.DWORD
+        wlan.WlanCloseHandle.argtypes    = [_wt.HANDLE, ctypes.c_void_p]
+
+        neg_ver = _wt.DWORD()
+        handle  = _wt.HANDLE()
+        if wlan.WlanOpenHandle(2, None, ctypes.byref(neg_ver), ctypes.byref(handle)) != 0:
+            return None, None
+        try:
+            iface_ptr = ctypes.c_void_p()
+            if wlan.WlanEnumInterfaces(handle, None, ctypes.byref(iface_ptr)) != 0:
+                return None, None
+            try:
+                if not iface_ptr.value:
+                    return None, None
+                base = iface_ptr.value
+                # WLAN_INTERFACE_INFO_LIST layout:
+                #   DWORD dwNumberOfItems  (+0)
+                #   DWORD dwIndex          (+4)
+                #   WLAN_INTERFACE_INFO[0] (+8):
+                #     GUID                 (16 bytes)
+                #     WCHAR description[256] (512 bytes)
+                #     DWORD isState
+                num = ctypes.c_uint32.from_address(base).value
+                if num == 0:
+                    return None, None
+                state = ctypes.c_uint32.from_address(base + 8 + 16 + 512).value
+                if state != 1:          # wlan_interface_state_connected
+                    return None, None
+                guid = _GUID.from_address(base + 8)
+                RSSI_OPCODE = 0x10000102  # wlan_intf_opcode_rssi
+                data_size = _wt.DWORD()
+                data_ptr  = ctypes.c_void_p()
+                op_type   = ctypes.c_uint()
+                if wlan.WlanQueryInterface(
+                        handle, ctypes.byref(guid), RSSI_OPCODE, None,
+                        ctypes.byref(data_size), ctypes.byref(data_ptr),
+                        ctypes.byref(op_type)) != 0:
+                    return None, None
+                try:
+                    dbm = ctypes.c_long.from_address(data_ptr.value).value
+                    pct = min(100, max(0, 2 * (dbm + 100)))
+                    return dbm, pct
+                finally:
+                    wlan.WlanFreeMemory(data_ptr)
+            finally:
+                wlan.WlanFreeMemory(iface_ptr)
+        finally:
+            wlan.WlanCloseHandle(handle, None)
+    except Exception:
+        return None, None
+
+
+def _wifi_text_color(dbm):
+    """Return an RGBA text colour for the WiFi icon based on signal strength.
+
+    Icon uses a light grey background; the number's colour signals quality:
+        >= -55  Excellent  →  vivid green      (0, 170, 60)
+        >= -65  Good       →  yellow-green     (110, 180, 0)
+        >= -75  Fair       →  dark orange      (210, 110, 0)
+        <  -75  Poor       →  red              (210, 30, 30)
+        None    No WiFi    →  medium grey      (120, 120, 120)
+    """
+    if dbm is None:
+        return (120, 120, 120, 255)
+    if dbm >= -55:
+        return (0, 170, 60, 255)
+    if dbm >= -65:
+        return (110, 180, 0, 255)
+    if dbm >= -75:
+        return (210, 110, 0, 255)
+    return (210, 30, 30, 255)
+
+
+def _load_font(size, pt):
+    """Load a bold TrueType font at *pt* points, falling back to the PIL default."""
+    for name in ['calibrib.ttf', 'arial.ttf', 'ariblk.ttf', 'arial black.ttf']:
+        for path in [name, f'C:\\Windows\\Fonts\\{name}']:
+            try:
+                return ImageFont.truetype(path, pt)
+            except Exception:
+                continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
 def make_icon_image(size=128, color1=(0, 122, 204), color2=(255, 255, 255), percentage=None, plugged=False):
-    """Generate a simple icon with battery percentage text.
-    
-    Args:
-        size: Icon size in pixels
-        color1: Primary color (unused, kept for compatibility)
-        color2: Secondary color (unused, kept for compatibility)
-        percentage: Battery percentage to display
-        plugged: Whether the laptop is charging (True = light green, False = light yellow)
+    """Battery tray icon — large % number on green (plugged) or yellow (unplugged) background."""
+    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    bg_color = (144, 238, 144, 255) if plugged else (255, 255, 0, 255)
+    draw.rectangle((0, 0, size, size), fill=bg_color)
+    if percentage is not None:
+        try:
+            font = _load_font(size, int(size * 1.0))
+            if font:
+                draw.text((size // 2, size // 2), f"{int(percentage)}",
+                          fill=(255, 0, 0, 255), font=font, anchor="mm")
+        except Exception as e:
+            logging.debug(f"Error creating battery icon image: {e}")
+    return image
+
+
+def make_wifi_icon_image(size=128, dbm=None):
+    """WiFi tray icon — light grey background, dBm number in signal-quality colour.
+
+    Light background keeps the number readable at any quality level.
+    The number colour signals quality (see _wifi_text_color):
+        >= -55  Excellent  →  vivid green
+        >= -65  Good       →  yellow-green
+        >= -75  Fair       →  dark orange
+        <  -75  Poor       →  red
+        None    No WiFi    →  grey
+    A dark outer border distinguishes this icon from the battery icon.
     """
     image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    
-    # Draw background based on charging status
-    # Light green (144, 238, 144) if charging, light yellow (255, 255, 0) if not
-    bg_color = (144, 238, 144, 255) if plugged else (255, 255, 0, 255)
-    draw.rectangle((0, 0, size, size), fill=bg_color)
-        
-    # Draw percentage text if provided
-    if percentage is not None:
-        try:
-            # Try to use a bold system font with larger size to fill the icon
-            font_size = int(size * 1.0)
-            # Try common system fonts
-            font = None
-            for font_name in ['calibrib.ttf', 'arial.ttf', 'ariblk.ttf', 'arial black.ttf', 'calibrib.ttf']:
-                try:
-                    font = ImageFont.truetype(font_name, font_size)
-                    break
-                except Exception as e:
-                    logging.debug(f"Font {font_name} not found: {e}")
-                    try:
-                        font = ImageFont.truetype(f"C:\\Windows\\Fonts\\{font_name}", font_size)
-                        break
-                    except Exception as e2:
-                        logging.debug(f"Font at C:\\Windows\\Fonts\\{font_name} not found: {e2}")
-                        continue
-            
-            if font is None:
-                # Fallback to default font if no TTF found
-                try:
-                    font = ImageFont.load_default()
-                except Exception as e:
-                    logging.debug(f"Failed to load default font: {e}")
-                    font = None
-            
-            if font:
-                text = f"{int(percentage)}"
-                # Draw text centered using anchor point
-                center_x = size // 2
-                center_y = size // 2
-                draw.text((center_x, center_y), text, fill=(255, 0, 0, 255), font=font, anchor="mm")
-        except Exception as e:
-            logging.debug(f"Error creating icon image: {e}")
-    
+    draw.rectangle((0, 0, size, size), fill=(225, 225, 225, 255))
+    # Dark outer border — visually separates from the battery icon
+    bw = max(6, size // 18)
+    draw.rectangle((0, 0, size - 1, size - 1),
+                   outline=(40, 40, 40, 255), width=bw)
+    text_color = _wifi_text_color(dbm)
+    try:
+        label = f"{dbm}" if dbm is not None else "—"
+        # Inner usable width after subtracting both border edges + small padding
+        max_w = size - 2 * bw - max(4, size // 30)
+        pt = int(size * 0.88)
+        font = _load_font(size, pt)
+        # Shrink font until the label fits horizontally
+        while font and pt > 10:
+            bbox = font.getbbox(label)
+            if (bbox[2] - bbox[0]) <= max_w:
+                break
+            pt = int(pt * 0.88)
+            font = _load_font(size, pt)
+        if font:
+            draw.text((size // 2, int(size * 0.48)), label,
+                      fill=text_color, font=font, anchor="mm")
+    except Exception as e:
+        logging.debug(f"Error creating wifi icon image: {e}")
     return image
 
 
@@ -170,6 +288,36 @@ def load_config():
     return dict(DEFAULT_CONFIG)
 
 
+class _SafeStreamHandler(logging.StreamHandler):
+    """StreamHandler that writes UTF-8 bytes directly to stdout.buffer.
+
+    On Windows the TextIOWrapper over stdout uses the console code page
+    (cp1252), which cannot encode emoji.  Writing encoded bytes directly to
+    the underlying binary buffer bypasses that codec entirely; modern
+    PowerShell / Windows Terminal can display UTF-8 natively.  If the buffer
+    is unavailable we fall back to 'replace' encoding.  Either way this
+    handler never raises and never prints '--- Logging error ---'.
+    """
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            buf = getattr(stream, 'buffer', None)
+            if buf is not None:
+                try:
+                    stream.flush()          # drain any text already buffered
+                except Exception:
+                    pass
+                buf.write((msg + self.terminator).encode('utf-8', errors='replace'))
+                buf.flush()
+            else:
+                enc = getattr(stream, 'encoding', None) or 'ascii'
+                stream.write(msg.encode(enc, errors='replace').decode(enc) + self.terminator)
+                stream.flush()
+        except Exception:
+            pass  # console is convenience only; never surface handler errors
+
+
 def setup_logging(enabled, date_str=None):
     """Configure logging based on settings. Safe to call multiple times (e.g. at midnight)."""
     if enabled:
@@ -179,9 +327,7 @@ def setup_logging(enabled, date_str=None):
         handlers = [logging.FileHandler(os.path.join(ROOT_DIR, log_filename))]
         if sys.stdout is not None:
             try:
-                handlers.append(
-                    logging.StreamHandler(stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False))
-                )
+                handlers.append(_SafeStreamHandler(sys.stdout))
             except Exception:
                 pass
         logging.basicConfig(
@@ -190,6 +336,9 @@ def setup_logging(enabled, date_str=None):
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=handlers
         )
+        # Silence any handler that still can't encode emoji (e.g. lastResort stderr).
+        # The file log captures everything; console output is convenience only.
+        logging.raiseExceptions = False
         # Suppress verbose third-party debug logs
         for noisy in ('matplotlib', 'telegram', 'httpcore', 'httpx', 'PIL'):
             logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -338,9 +487,11 @@ class TrayMonitor:
         self._last_csv_time = None
         self._current_day = None
         self._disk_alert_sent_date = None
+        self._wifi_dbm = None          # last known WiFi dBm; None = no WiFi / not yet read
         self._open_windows = []  # track open tkinter windows for clean exit
 
         self.icon = None
+        self.wifi_icon = None
         if pystray:
             image = make_icon_image(size=512, percentage=100, plugged=True)
             menu = pystray.Menu(
@@ -352,6 +503,8 @@ class TrayMonitor:
                 pystray.MenuItem('Exit', self.exit)
             )
             self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Battery Monitor v{__version__}: {HOSTNAME}", menu)
+            wifi_image = make_wifi_icon_image(size=512, dbm=None)
+            self.wifi_icon = pystray.Icon(f"wifi_{HOSTNAME}", wifi_image, "WiFi")
 
     def toggle_monitoring(self, icon=None, item=None):
         """Toggle monitoring on/off."""
@@ -368,14 +521,8 @@ class TrayMonitor:
         self._thread.start()
         self._running = True
         self._notify(f"[{HOSTNAME}] ▶️ Battery monitoring started")
-        # Rotate old CSV logs, then send yesterday's graph followed by today's (in order)
+        # Rotate old CSV logs on startup
         threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
-        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        today = datetime.date.today().strftime('%Y-%m-%d')
-        def _send_startup_graphs():
-            self._generate_and_send_graph(yesterday)
-            self._generate_and_send_graph(today)
-        threading.Thread(target=_send_startup_graphs, daemon=True).start()
 
     def stop_monitoring(self, icon=None, item=None):
         if not self._running:
@@ -384,7 +531,7 @@ class TrayMonitor:
         if self._thread:
             self._thread.join(timeout=2)
         self._running = False
-        self._notify(f"[{HOSTNAME}] ⏹️ Battery monitoring stopped")
+        self._notify(f"[{HOSTNAME}] ⏹️ Monitoring stopped")
 
     def show_status(self, icon=None, item=None):
         status = "Running" if self._running else "Stopped"
@@ -570,7 +717,11 @@ class TrayMonitor:
             except Exception:
                 pass
             try:
-                canvas.get_tk_widget().unbind('<Destroy>')
+                # Use bind() to *replace* the <Destroy> callback with a no-op.
+                # unbind() only removes widget-instance bindings; bind() overwrites
+                # the callback regardless of how matplotlib registered it, so
+                # filter_destroy can never run (and crash) after this point.
+                canvas.get_tk_widget().bind('<Destroy>', lambda e: None)
             except Exception:
                 pass
 
@@ -642,9 +793,9 @@ class TrayMonitor:
         threshold = int(self.config.get('threshold', 20))
         if self.config.get('telegram_enabled'):
             if info:
-                exit_msg = f"⏹️ Battery monitoring stopped\n{info['percent']}% (Alert at {threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}"
+                exit_msg = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Plugged' if info['plugged'] else '⚡ Unplugged'}"
             else:
-                exit_msg = "⏹️ Battery monitoring stopped"
+                exit_msg = "⏹️ Monitoring stopped"
             try:
                 send_telegram_async(exit_msg, conf=self.config.get('telegram_conf'))
                 time.sleep(2.0)  # Give Telegram time to send
@@ -653,20 +804,25 @@ class TrayMonitor:
         
         # Send exit notification
         if info:
-            self._notify(f"⏹️ Battery monitoring stopped\n{info['percent']}% (Alert at {threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}")
+            self._notify(f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Plugged' if info['plugged'] else '⚡ Unplugged'}")
         else:
-            self._notify("⏹️ Battery monitoring stopped")
+            self._notify("⏹️ Monitoring stopped")
         
         time.sleep(1.0)  # Give notification time to display
         
         if self.icon:
             self.icon.stop()
+        if self.wifi_icon:
+            self.wifi_icon.stop()
 
     def run(self):
         if not pystray:
             print("pystray or PIL not installed. Install with: pip install pystray pillow")
             return
         try:
+            # Run the WiFi icon in a daemon thread; the battery icon runs on the main thread.
+            if self.wifi_icon:
+                threading.Thread(target=self.wifi_icon.run, daemon=True).start()
             self.icon.run()
         except KeyboardInterrupt:
             self.exit()
@@ -691,13 +847,43 @@ class TrayMonitor:
         return {"percent": bat.percent, "plugged": bat.power_plugged, "time_left": time_left}
 
     def _update_icon(self, percentage, plugged=False):
-        """Update the tray icon with current battery percentage and charging status."""
+        """Update the battery tray icon with current percentage and charging status."""
         try:
             if self.icon and pystray:
                 image = make_icon_image(size=512, percentage=percentage, plugged=plugged)
                 self.icon.icon = image
         except Exception as e:
-            logging.debug(f"Failed to update icon: {e}")
+            logging.debug(f"Failed to update battery icon: {e}")
+
+    def _update_wifi_icon(self, dbm):
+        """Update the WiFi tray icon with current dBm value."""
+        try:
+            if self.wifi_icon and pystray:
+                image = make_wifi_icon_image(size=512, dbm=dbm)
+                if dbm is not None:
+                    if dbm >= -55:
+                        quality = "Excellent"
+                    elif dbm >= -65:
+                        quality = "Good"
+                    elif dbm >= -75:
+                        quality = "Fair"
+                    else:
+                        quality = "Poor"
+                    status_line = f"WiFi: {dbm} dBm  ({quality})"
+                else:
+                    status_line = "WiFi: not connected"
+                ranges = (
+                    "\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
+                    "Signal ranges:\n"
+                    "  \u2265 \u221255 dBm  \u2192  Excellent\n"
+                    "  \u2265 \u221265 dBm  \u2192  Good\n"
+                    "  \u2265 \u221275 dBm  \u2192  Fair\n"
+                    "  < \u221275 dBm   \u2192  Poor"
+                )
+                self.wifi_icon.icon = image
+                self.wifi_icon.title = f"{status_line}\n{ranges}"
+        except Exception as e:
+            logging.debug(f"Failed to update wifi icon: {e}")
 
     def _rotate_csv_logs(self):
         """Delete daily CSV and log files older than data_log_retention_days."""
@@ -886,7 +1072,7 @@ class TrayMonitor:
                 drive = part.device.rstrip('\\').rstrip('/')
                 logging.info(f"Disk check: {drive} at {pct:.1f}%")
                 if pct >= threshold:
-                    msg = f"{ALERT_BORDER}\n\U0001faa3 Drive {drive} at {pct:.0f}% (Threshold alert {threshold}%) - {free_gb:.1f} GB free of {total_gb:.0f} GB\n{ALERT_BORDER}"
+                    msg = f"{ALERT_BORDER}\n💾 Drive {drive} at {pct:.0f}% (Threshold alert {threshold}%) - {free_gb:.1f} GB free of {total_gb:.0f} GB\n{ALERT_BORDER}"
                     logging.warning(msg)
                     if self.config.get('telegram_enabled'):
                         send_telegram_async(msg, conf=conf)
@@ -896,6 +1082,8 @@ class TrayMonitor:
 
     def _monitor_loop(self):
         icon_update_counter = 0
+        wifi_poll_counter = 0
+        WIFI_POLL_INTERVAL = 5  # poll WiFi every 5 loop iterations (= seconds when interval=1)
         while not self._stop_event.is_set():
             # refresh config each loop in case user changed settings
             cfg = load_config()
@@ -909,6 +1097,7 @@ class TrayMonitor:
             if info:
                 percent = info['percent']
                 plugged = info['plugged']
+                time_left = info.get('time_left')
                 now = time.time()
 
                 # Midnight rollover detection — generate graph for completed day
@@ -944,13 +1133,24 @@ class TrayMonitor:
                     self._write_csv_row(timestamp, percent, cpu_percent, plugged)
                     self._last_csv_time = now
 
-                # Update icon with battery percentage and charging status
+                # Update battery icon
                 self._update_icon(percent, plugged=plugged)
+
+                # Poll WiFi every WIFI_POLL_INTERVAL seconds and update the wifi tray icon
+                wifi_poll_counter += 1
+                if wifi_poll_counter >= WIFI_POLL_INTERVAL:
+                    wifi_poll_counter = 0
+                    dbm, _pct = _get_wifi_dbm()
+                    self._wifi_dbm = dbm
+                    self._update_wifi_icon(dbm)
                 
                 if (not plugged) and (percent <= threshold):
                     # Enter low state and send (or resend) low-battery alert
                     if (self._last_alert_time is None) or ((now - self._last_alert_time) >= resend_seconds):
-                        msg = f"{ALERT_BORDER}\n🪫 Battery low: {percent}% (Alert at {threshold}%) - {'Plugged' if plugged else 'Unplugged'}\n{ALERT_BORDER}"
+                        msg = f"{ALERT_BORDER}\n🪫 Battery low: {percent}% (Alert at {threshold}%)\n⚡ Unplugged"
+                        if time_left:
+                            msg += f"\n⏱️ ~{time_left} remaining"
+                        msg += f"\n{ALERT_BORDER}"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
                         self._notify(msg)
@@ -972,7 +1172,7 @@ class TrayMonitor:
                             dur_text = f"Was low for {mins}m {secs}s"
                         else:
                             dur_text = ""
-                        rec_msg = f"🔋 Plugged in and/or battery recovered: {percent}% ({threshold}%)"
+                        rec_msg = f"� Battery recovered: {percent}% (Alert at {threshold}%)"
                         if dur_text:
                             rec_msg += f"\n{dur_text}"
                         if self.config.get('telegram_enabled'):
@@ -1011,7 +1211,7 @@ class TrayMonitor:
                 pct = usage.percent
                 free_gb = usage.free / (1024 ** 3)
                 total_gb = usage.total / (1024 ** 3)
-                lines.append(f"{drive} at {pct:.1f}% - {free_gb:.1f} GB free of {total_gb:.0f} GB")
+                lines.append(f"💾 Drive {drive} at {pct:.1f}% - {free_gb:.1f} GB free of {total_gb:.0f} GB")
         except Exception as e:
             logging.error(f"Failed to get disk summary: {e}")
         return lines
@@ -1039,17 +1239,26 @@ if __name__ == '__main__':
     # start monitoring automatically on launch
     monitor.start_monitoring()
     
-    # Send startup Telegram message if enabled
+    # Send startup Telegram message then graphs (in order) in one thread
     if cfg.get('telegram_enabled'):
         info = monitor._get_battery_info()
         threshold = int(cfg.get('threshold', 20))
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if info:
-            startup_msg = f"▶️ Battery Monitor v{__version__}.\n\nBattery {info['percent']}% (Alert at {threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
+            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Plugged' if info['plugged'] else '⚡ Unplugged'}"
+            if info.get('time_left'):
+                startup_msg += f"\n⏱️ ~{info['time_left']} remaining"
         else:
-            startup_msg = f"▶️ Battery Monitor v{__version__}."
+            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}"
         disk_lines = monitor._disk_summary_lines()
         if disk_lines:
             startup_msg += "\n" + "\n".join(disk_lines)
-        send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        today_str = datetime.date.today().strftime('%Y-%m-%d')
+        def _send_startup():
+            send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
+            monitor._generate_and_send_graph(yesterday)
+            monitor._generate_and_send_graph(today_str)
+        threading.Thread(target=_send_startup, daemon=True).start()
     
     monitor.run()

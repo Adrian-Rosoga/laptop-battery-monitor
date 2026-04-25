@@ -1,12 +1,13 @@
 # 🔋 Laptop Battery Monitor
 
-A lightweight Windows 11 system-tray application that monitors battery level, CPU usage, and disk space — and sends Telegram alerts when thresholds are exceeded.
+A lightweight Windows 11 system-tray application that monitors battery level, WiFi signal strength, CPU usage, and disk space — and sends Telegram alerts when thresholds are exceeded.
 
 ---
 
 ## Features
 
 - **System tray icon** — shows battery % with colour coding (green = charging, yellow = on battery)
+- **WiFi signal tray icon** — second tray icon showing current signal in dBm; background colour codes quality (see ranges below); hover for legend
 - **Low-battery Telegram alerts** — fires when battery drops below a configurable threshold; repeats on a configurable interval until resolved
 - **Battery-recovered notification** — sent when the laptop is plugged back in or battery rises above threshold
 - **Daily disk space check** — checks all local drives at a configurable time and alerts if any drive exceeds a usage threshold
@@ -14,6 +15,17 @@ A lightweight Windows 11 system-tray application that monitors battery level, CP
 - **CSV data logging** — records battery %, CPU %, charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
 - **About dialog** with GitHub link
+
+### WiFi signal quality bands
+
+| dBm | Quality |
+|-----|---------|
+| ≥ −55 | Excellent |
+| ≥ −65 | Good |
+| ≥ −75 | Fair |
+| < −75 | Poor |
+
+The WiFi icon uses the Windows Native WiFi API (`wlanapi.dll`) via `ctypes` — no `netsh` process, no geolocation, no "Location in use" tray notification.
 
 ---
 
@@ -167,7 +179,7 @@ D: at 44.2% - 264.3 GB free of 476 GB
 ```
 [GramAdi]
 🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-🪣 Drive C: at 91% (Threshold alert 90%) - 95.8 GB free of 929 GB
+💾 Drive C: at 91% (Threshold alert 90%) - 95.8 GB free of 929 GB
 🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 ```
 
@@ -177,7 +189,7 @@ D: at 44.2% - 264.3 GB free of 476 GB
 
 | Package | Purpose |
 |---------|---------|
-| [pystray](https://github.com/moses-palmer/pystray) | System tray icon |
+| [pystray](https://github.com/moses-palmer/pystray) | System tray icon(s) |
 | [Pillow](https://python-pillow.org/) | Icon image generation |
 | [psutil](https://github.com/giampaolo/psutil) | Battery, CPU, disk info |
 | [telegram-send](https://github.com/rahiel/telegram-send) | Telegram notifications |
