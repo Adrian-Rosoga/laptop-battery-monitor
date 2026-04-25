@@ -68,9 +68,10 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "1.5"
+__version__ = "1.6"
 HOSTNAME = socket.gethostname()
-LOG_LEVEL = logging.DEBUG
+#LOG_LEVEL = logging.DEBUG
+LOG_LEVEL = logging.INFO
 #LOG_LEVEL = logging.CRITICAL    # To actually disable logging output, set to CRITICAL and use logging.debug for all log messages in code
 
 # Determine ROOT_DIR based on whether running as executable or script
@@ -240,14 +241,14 @@ class SettingsWindow:
         self.threshold_var = tk.StringVar(value=str(self.config.get('threshold', 20)))
         tk.Entry(self.root, textvariable=self.threshold_var).pack(fill='x', padx=8)
 
-        tk.Label(self.root, text="Check interval (s)").pack(anchor='w', padx=8, pady=(8, 0))
+        tk.Label(self.root, text="Check interval (seconds)").pack(anchor='w', padx=8, pady=(8, 0))
         self.interval_var = tk.StringVar(value=str(self.config.get('interval', 1)))
         tk.Entry(self.root, textvariable=self.interval_var).pack(fill='x', padx=8)
 
         self.telegram_var = tk.BooleanVar(value=bool(self.config.get('telegram_enabled')))
         tk.Checkbutton(self.root, text="Enable Telegram alerts", variable=self.telegram_var).pack(anchor='w', padx=8, pady=(8, 0))
 
-        tk.Label(self.root, text="telegram-send config file (optional)").pack(anchor='w', padx=8, pady=(8, 0))
+        tk.Label(self.root, text="Config file telegram-send (optional)").pack(anchor='w', padx=8, pady=(8, 0))
         self.telegram_conf_var = tk.StringVar(value=str(self.config.get('telegram_conf') or ""))
         tk.Entry(self.root, textvariable=self.telegram_conf_var).pack(fill='x', padx=8)
         
@@ -255,7 +256,7 @@ class SettingsWindow:
         self.resend_var = tk.StringVar(value=str(self.config.get('resend_minutes', 5)))
         tk.Entry(self.root, textvariable=self.resend_var).pack(fill='x', padx=8)
 
-        tk.Label(self.root, text="Data log interval (s)").pack(anchor='w', padx=8, pady=(8, 0))
+        tk.Label(self.root, text="Data log interval (seconds)").pack(anchor='w', padx=8, pady=(8, 0))
         self.data_log_interval_var = tk.StringVar(value=str(self.config.get('data_log_interval', 60)))
         tk.Entry(self.root, textvariable=self.data_log_interval_var).pack(fill='x', padx=8)
 
@@ -301,7 +302,7 @@ class SettingsWindow:
         messagebox.showinfo("Telegram", "ℹ️ Test message sent (if configured)")
 
     def close(self):
-        self.root.destroy()
+        self.root.quit()
 
 
 class TrayMonitor:
@@ -324,7 +325,7 @@ class TrayMonitor:
             menu = pystray.Menu(
                 pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._running),
                 pystray.MenuItem('Show Status', self.show_status),
-                pystray.MenuItem('Show Graph', self.show_graph),
+                pystray.MenuItem('Show Graph', self.show_graph, default=True),
                 pystray.MenuItem('Settings', self.open_settings),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
@@ -345,13 +346,15 @@ class TrayMonitor:
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
         self._running = True
-        self._notify(f"▶️ Battery monitoring started on {HOSTNAME}")
-        # Rotate old CSV logs and generate yesterday's and today's graph on startup
+        self._notify(f"[{HOSTNAME}] ▶️ Battery monitoring started")
+        # Rotate old CSV logs, then send yesterday's graph followed by today's (in order)
         threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        threading.Thread(target=self._generate_and_send_graph, args=(yesterday,), daemon=True).start()
         today = datetime.date.today().strftime('%Y-%m-%d')
-        threading.Thread(target=self._generate_and_send_graph, args=(today,), daemon=True).start()
+        def _send_startup_graphs():
+            self._generate_and_send_graph(yesterday)
+            self._generate_and_send_graph(today)
+        threading.Thread(target=_send_startup_graphs, daemon=True).start()
 
     def stop_monitoring(self, icon=None, item=None):
         if not self._running:
@@ -360,7 +363,7 @@ class TrayMonitor:
         if self._thread:
             self._thread.join(timeout=2)
         self._running = False
-        self._notify(f"⏹️ Battery monitoring stopped on {HOSTNAME}")
+        self._notify(f"[{HOSTNAME}] ⏹️ Battery monitoring stopped")
 
     def show_status(self, icon=None, item=None):
         status = "Running" if self._running else "Stopped"
@@ -389,7 +392,7 @@ class TrayMonitor:
         def _show_about():
             about_window = tk.Tk()
             about_window.title("About")
-            about_window.geometry("400x250")
+            about_window.geometry("400x320")
             about_window.resizable(False, False)
             
             # Title and version
@@ -410,14 +413,19 @@ class TrayMonitor:
             github_link.bind("<Button-1>", lambda e: open_github())
             
             # Credits
-            credits_label = tk.Label(about_window, text="Adrian Rosoga\n(actually GPT-5 mini and Claude Haiku 4.5)\nFebruary 2026", font=("Arial", 10))
+            credits_label = tk.Label(about_window, text="Adrian Rosoga\n(actually GPT-5 mini\nClaude Haiku 4.5\nClaude Opus 4.6\nClaude Sonnet 4.6\n...)\nFebruary 2026", font=("Arial", 10))
             credits_label.pack(pady=10)
             
-            # Close button
-            close_button = tk.Button(about_window, text="Close", command=about_window.destroy)
+            # Close button — use quit() not destroy() so cleanup can run on this thread
+            close_button = tk.Button(about_window, text="Close", command=about_window.quit)
             close_button.pack(pady=10)
+            about_window.protocol("WM_DELETE_WINDOW", about_window.quit)
             
             about_window.mainloop()
+
+            import gc
+            gc.collect()
+            about_window.destroy()
         
         threading.Thread(target=_show_about, daemon=True).start()
 
@@ -467,24 +475,39 @@ class TrayMonitor:
                                   relief=tk.SUNKEN, font=("Courier", 14, "bold"), padx=6)
             status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
-            # Pre-build list of valid (non-NaN) points for nearest-point lookup
-            valid_points = [
-                (pt, plot_battery[i], plot_cpu[i])
-                for i, pt in enumerate(plot_times)
-                if not (isinstance(plot_battery[i], float) and math.isnan(plot_battery[i]))
-            ]
-
             def on_motion(event):
                 if event.inaxes != ax or event.xdata is None:
                     status_var.set("  Move cursor over graph to see values")
                     return
                 t = mdates.num2date(event.xdata).replace(tzinfo=None)
-                if not valid_points:
+                n = len(plot_times)
+                if n < 2:
                     return
-                pt, bat, cpu = min(valid_points, key=lambda x: abs((x[0] - t).total_seconds()))
-                status_var.set(
-                    f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%"
-                )
+                # Cursor outside the data range entirely → no data
+                if t < plot_times[0] or t > plot_times[-1]:
+                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A")
+                    return
+                # Binary search for the two plot points that bracket the cursor time.
+                # plot_times includes NaN sentinel datetimes at gap midpoints, so the
+                # bracketing pair tells us definitively whether the cursor is in a gap.
+                import bisect
+                i = bisect.bisect_right(plot_times, t) - 1
+                i = max(0, min(i, n - 2))   # clamp so i and i+1 are both valid
+                bat_l = plot_battery[i]
+                bat_r = plot_battery[i + 1]
+                in_gap = (isinstance(bat_l, float) and math.isnan(bat_l)) or \
+                         (isinstance(bat_r, float) and math.isnan(bat_r))
+                if in_gap:
+                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A")
+                else:
+                    # Snap to whichever bracketing point is closer
+                    if abs((plot_times[i] - t).total_seconds()) <= abs((plot_times[i + 1] - t).total_seconds()):
+                        pt, bat, cpu = plot_times[i], bat_l, plot_cpu[i]
+                    else:
+                        pt, bat, cpu = plot_times[i + 1], bat_r, plot_cpu[i + 1]
+                    status_var.set(
+                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%"
+                    )
 
             canvas.mpl_connect('motion_notify_event', on_motion)
 
@@ -496,6 +519,17 @@ class TrayMonitor:
             win.protocol("WM_DELETE_WINDOW", _close)
             win.bind("<Escape>", lambda e: _close())
             win.focus_force()
+            # Remove the minimize button via Windows API
+            try:
+                import ctypes
+                GWL_STYLE    = -16
+                WS_MINIMIZEBOX = 0x00020000
+                win.update()  # ensure the window handle exists
+                hwnd = int(win.frame(), 16)
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~WS_MINIMIZEBOX)
+            except Exception:
+                pass
             win.mainloop()
 
             # mainloop has returned — we're still on this thread with the Tcl interpreter alive.
@@ -538,7 +572,7 @@ class TrayMonitor:
             #    finalizes Variable.__del__ immediately on this thread.
             try:
                 del status_bar, status_var, toolbar, canvas, fig, ax
-                del valid_points, plot_times, plot_battery, plot_cpu
+                del plot_times, plot_battery, plot_cpu
             except Exception:
                 pass
 
@@ -558,9 +592,13 @@ class TrayMonitor:
         def _open():
             win = SettingsWindow(None, self.config, on_save=self._on_config_save)
             self._open_windows.append(win.root)
+            win.root.protocol("WM_DELETE_WINDOW", win.root.quit)
             win.root.mainloop()
             if win.root in self._open_windows:
                 self._open_windows.remove(win.root)
+            import gc
+            gc.collect()
+            win.root.destroy()
 
         threading.Thread(target=_open, daemon=True).start()
 
@@ -583,7 +621,7 @@ class TrayMonitor:
         threshold = int(self.config.get('threshold', 20))
         if self.config.get('telegram_enabled'):
             if info:
-                exit_msg = f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}"
+                exit_msg = f"⏹️ Battery monitoring stopped\n{info['percent']}% (Alert at {threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}"
             else:
                 exit_msg = "⏹️ Battery monitoring stopped"
             try:
@@ -594,7 +632,7 @@ class TrayMonitor:
         
         # Send exit notification
         if info:
-            self._notify(f"⏹️ Battery monitoring stopped — {info['percent']}% ({threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}")
+            self._notify(f"⏹️ Battery monitoring stopped\n{info['percent']}% (Alert at {threshold}%) - {'Plugged' if info['plugged'] else 'Unplugged'}")
         else:
             self._notify("⏹️ Battery monitoring stopped")
         
@@ -755,6 +793,7 @@ class TrayMonitor:
             ]
             ax.legend(handles=legend_elements, loc='upper right')
             ax.set_title(f'Battery & CPU — {date_str} — {HOSTNAME}')
+            ax.set_xlim(times[0], times[-1])
             ax.grid(True, axis='y', alpha=0.3)
             ax.grid(True, axis='x', alpha=0.07)
             fig.tight_layout()
@@ -786,7 +825,7 @@ class TrayMonitor:
         if not graph_path or not os.path.isfile(graph_path):
             return
         import asyncio
-        caption = f"📊 Daily battery & CPU report for {date_str} — {HOSTNAME}"
+        caption = f"[{HOSTNAME}] 📊 Daily battery & CPU report for {date_str}"
         conf = _resolve_telegram_conf(self.config.get('telegram_conf'))
         try:
             async def _send():
@@ -920,9 +959,9 @@ if __name__ == '__main__':
         info = monitor._get_battery_info()
         threshold = int(cfg.get('threshold', 20))
         if info:
-            startup_msg = f"▶️ Battery Monitor v{__version__}. Started — {info['percent']}% ({threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
+            startup_msg = f"▶️ Battery Monitor v{__version__}.\n\nStarted — {info['percent']}% (Alert at {threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
         else:
-            startup_msg = f"▶️ Battery Monitor v{__version__}. Started"
+            startup_msg = f"▶️ Battery Monitor v{__version__}.\n\nStarted"
         send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
     
     monitor.run()
