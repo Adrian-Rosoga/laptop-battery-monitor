@@ -25,3 +25,6 @@ Thumbs.db
 # Credentials & local files
 telegram-send.conf
 MyDist/
+battery_log_*.csv
+battery_log_*.png
+!docs/

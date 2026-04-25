@@ -68,8 +68,9 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "1.6"
+__version__ = "1.7"
 HOSTNAME = socket.gethostname()
+ALERT_BORDER = "🚨" * 10
 #LOG_LEVEL = logging.DEBUG
 LOG_LEVEL = logging.INFO
 #LOG_LEVEL = logging.CRITICAL    # To actually disable logging output, set to CRITICAL and use logging.debug for all log messages in code
@@ -152,6 +153,9 @@ DEFAULT_CONFIG = {
     "logging_enabled": False,
     "data_log_interval": 60,
     "data_log_retention_days": 30,
+    "disk_alert_enabled": True,
+    "disk_alert_threshold": 90,
+    "disk_alert_time": "07:00",
 }
 DEFAULT_CONFIG["resend_minutes"] = 5
 
@@ -215,7 +219,7 @@ def _resolve_telegram_conf(conf=None):
 def send_telegram_async(message, conf=None):
     import asyncio
     try:
-        full = f"[{HOSTNAME}] {message}"
+        full = f"[{HOSTNAME}]\n{message}"
         resolved = _resolve_telegram_conf(conf)
         if resolved:
             asyncio.run(telegram_send.send(messages=[full], conf=resolved))
@@ -235,7 +239,7 @@ class SettingsWindow:
 
         self.root = tk.Tk()
         self.root.title("Battery Monitor Settings")
-        self.root.geometry("320x400")
+        self.root.geometry("320x560")
 
         tk.Label(self.root, text="Low battery threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
         self.threshold_var = tk.StringVar(value=str(self.config.get('threshold', 20)))
@@ -267,6 +271,19 @@ class SettingsWindow:
         self.logging_var = tk.BooleanVar(value=bool(self.config.get('logging_enabled')))
         tk.Checkbutton(self.root, text="Enable logging", variable=self.logging_var).pack(anchor='w', padx=8, pady=(8, 0))
 
+        tk.Label(self.root, text="─" * 38).pack(anchor='w', padx=8, pady=(8, 0))
+
+        self.disk_alert_var = tk.BooleanVar(value=bool(self.config.get('disk_alert_enabled', True)))
+        tk.Checkbutton(self.root, text="Enable daily disk space alert", variable=self.disk_alert_var).pack(anchor='w', padx=8, pady=(4, 0))
+
+        tk.Label(self.root, text="Disk usage alert threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
+        self.disk_threshold_var = tk.StringVar(value=str(self.config.get('disk_alert_threshold', 90)))
+        tk.Entry(self.root, textvariable=self.disk_threshold_var).pack(fill='x', padx=8)
+
+        tk.Label(self.root, text="Disk alert time (HH:MM, 24h)").pack(anchor='w', padx=8, pady=(8, 0))
+        self.disk_alert_time_var = tk.StringVar(value=str(self.config.get('disk_alert_time', '07:00')))
+        tk.Entry(self.root, textvariable=self.disk_alert_time_var).pack(fill='x', padx=8)
+
         frm = tk.Frame(self.root)
         frm.pack(fill='x', padx=8, pady=10)
         tk.Button(frm, text="Save", command=self.save).pack(side='left')
@@ -284,6 +301,9 @@ class SettingsWindow:
             self.config['logging_enabled'] = bool(self.logging_var.get())
             conf = self.telegram_conf_var.get().strip()
             self.config['telegram_conf'] = conf if conf else None
+            self.config['disk_alert_enabled'] = bool(self.disk_alert_var.get())
+            self.config['disk_alert_threshold'] = int(self.disk_threshold_var.get())
+            self.config['disk_alert_time'] = self.disk_alert_time_var.get().strip()
             save_config(self.config)
             if self.on_save:
                 self.on_save(self.config)
@@ -317,6 +337,7 @@ class TrayMonitor:
         self._running = False
         self._last_csv_time = None
         self._current_day = None
+        self._disk_alert_sent_date = None
         self._open_windows = []  # track open tkinter windows for clean exit
 
         self.icon = None
@@ -844,6 +865,35 @@ class TrayMonitor:
         if graph_path:
             self._send_graph_telegram(graph_path, date_str)
 
+    def _check_disk_space(self):
+        """Check all local fixed drives and send a Telegram alert for any at/above the threshold."""
+        if not psutil:
+            return
+        threshold = int(self.config.get('disk_alert_threshold', 90))
+        conf = self.config.get('telegram_conf')
+        try:
+            for part in psutil.disk_partitions(all=False):
+                # Skip optical drives and network mounts; only physical/local drives
+                if 'cdrom' in part.opts or part.fstype == '':
+                    continue
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                except (PermissionError, OSError):
+                    continue
+                pct = usage.percent
+                free_gb = usage.free / (1024 ** 3)
+                total_gb = usage.total / (1024 ** 3)
+                drive = part.device.rstrip('\\').rstrip('/')
+                logging.info(f"Disk check: {drive} at {pct:.1f}%")
+                if pct >= threshold:
+                    msg = f"{ALERT_BORDER}\n\U0001faa3 Drive {drive} at {pct:.0f}% (Threshold alert {threshold}%) - {free_gb:.1f} GB free of {total_gb:.0f} GB\n{ALERT_BORDER}"
+                    logging.warning(msg)
+                    if self.config.get('telegram_enabled'):
+                        send_telegram_async(msg, conf=conf)
+                    self._notify(msg)
+        except Exception as e:
+            logging.error(f"Failed to check disk space: {e}")
+
     def _monitor_loop(self):
         icon_update_counter = 0
         while not self._stop_event.is_set():
@@ -870,6 +920,19 @@ class TrayMonitor:
                     setup_logging(self.config.get('logging_enabled', False))
                 self._current_day = today
 
+                # Daily disk space check
+                if self.config.get('disk_alert_enabled', True):
+                    disk_alert_time_str = self.config.get('disk_alert_time', '07:00')
+                    try:
+                        h, m = map(int, disk_alert_time_str.split(':'))
+                        now_dt = datetime.datetime.now()
+                        alert_dt = now_dt.replace(hour=h, minute=m, second=0, microsecond=0)
+                        if now_dt >= alert_dt and self._disk_alert_sent_date != today:
+                            self._disk_alert_sent_date = today
+                            threading.Thread(target=self._check_disk_space, daemon=True).start()
+                    except Exception as e:
+                        logging.error(f"Disk alert time parse error: {e}")
+
                 # CSV logging
                 data_log_interval = int(self.config.get('data_log_interval', 60))
                 if (self._last_csv_time is None) or ((now - self._last_csv_time) >= data_log_interval):
@@ -887,7 +950,7 @@ class TrayMonitor:
                 if (not plugged) and (percent <= threshold):
                     # Enter low state and send (or resend) low-battery alert
                     if (self._last_alert_time is None) or ((now - self._last_alert_time) >= resend_seconds):
-                        msg = f"🪫 Battery low: {percent}% ({threshold}%)"
+                        msg = f"{ALERT_BORDER}\n🪫 Battery low: {percent}% (Alert at {threshold}%) - {'Plugged' if plugged else 'Unplugged'}\n{ALERT_BORDER}"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
                         self._notify(msg)
@@ -931,6 +994,28 @@ class TrayMonitor:
                     break
                 time.sleep(1)
 
+    def _disk_summary_lines(self):
+        """Return a list of strings like 'C: at 89.7% - 95.8 GB free of 929 GB' for all local drives."""
+        if not psutil:
+            return []
+        lines = []
+        try:
+            for part in psutil.disk_partitions(all=False):
+                if 'cdrom' in part.opts or part.fstype == '':
+                    continue
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                except (PermissionError, OSError):
+                    continue
+                drive = part.device.rstrip('\\').rstrip('/')
+                pct = usage.percent
+                free_gb = usage.free / (1024 ** 3)
+                total_gb = usage.total / (1024 ** 3)
+                lines.append(f"{drive} at {pct:.1f}% - {free_gb:.1f} GB free of {total_gb:.0f} GB")
+        except Exception as e:
+            logging.error(f"Failed to get disk summary: {e}")
+        return lines
+
     def _notify(self, message):
         try:
             from plyer import notification
@@ -959,9 +1044,12 @@ if __name__ == '__main__':
         info = monitor._get_battery_info()
         threshold = int(cfg.get('threshold', 20))
         if info:
-            startup_msg = f"▶️ Battery Monitor v{__version__}.\n\nStarted — {info['percent']}% (Alert at {threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
+            startup_msg = f"▶️ Battery Monitor v{__version__}.\n\nBattery {info['percent']}% (Alert at {threshold}%) {'- Plugged' if info['plugged'] else '- Unplugged'}"
         else:
-            startup_msg = f"▶️ Battery Monitor v{__version__}.\n\nStarted"
+            startup_msg = f"▶️ Battery Monitor v{__version__}."
+        disk_lines = monitor._disk_summary_lines()
+        if disk_lines:
+            startup_msg += "\n" + "\n".join(disk_lines)
         send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
     
     monitor.run()
