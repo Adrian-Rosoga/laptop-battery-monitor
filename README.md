@@ -12,7 +12,7 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **Battery-recovered notification** — sent when the laptop is plugged back in or battery rises above threshold
 - **Daily disk space check** — checks all local drives at a configurable time and alerts if any drive exceeds a usage threshold
 - **Daily battery & CPU graph** — interactive window with zoom/pan and cursor readout; also sent automatically via Telegram at midnight and on startup
-- **CSV data logging** — records battery %, CPU %, charging state every N seconds; auto-rotated after a configurable retention period
+- **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
 - **About dialog** with GitHub link
 
@@ -160,9 +160,9 @@ Copy-Item dist\laptop_battery_monitor.exe MyDist\
 **Startup:**
 ```
 [GramAdi]
-▶️ Battery Monitor v1.7.
+▶️ Battery Monitor v1.9.
 
-Battery 40% (Alert at 30%) - Plugged
+Battery 40% (Alert at 30%) - Charging
 C: at 89.7% - 95.8 GB free of 929 GB
 D: at 44.2% - 264.3 GB free of 476 GB
 ```
@@ -171,7 +171,7 @@ D: at 44.2% - 264.3 GB free of 476 GB
 ```
 [GramAdi]
 🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-🪫 Battery low: 15% (Alert at 20%) - Unplugged
+🪫 Battery low: 15% (Alert at 20%) - Discharging
 🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 ```
 

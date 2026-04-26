@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tray-controlled background battery monitor for Windows 11.
 
 This Python script creates a system tray icon with a menu to configure the background
@@ -70,9 +70,9 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "1.8"
+__version__ = "1.9"
 HOSTNAME = socket.gethostname()
-ALERT_BORDER = "🚨" * 10
+ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
 LOG_LEVEL = logging.INFO
 #LOG_LEVEL = logging.CRITICAL    # To actually disable logging output, set to CRITICAL and use logging.debug for all log messages in code
@@ -206,7 +206,7 @@ def _load_font(size, pt):
 
 
 def make_icon_image(size=128, color1=(0, 122, 204), color2=(255, 255, 255), percentage=None, plugged=False):
-    """Battery tray icon — large % number on green (plugged) or yellow (unplugged) background."""
+    """Battery tray icon — large % number on green (charging) or yellow (discharging) background."""
     image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     bg_color = (144, 238, 144, 255) if plugged else (255, 255, 0, 255)
@@ -487,7 +487,8 @@ class TrayMonitor:
         self._last_csv_time = None
         self._current_day = None
         self._disk_alert_sent_date = None
-        self._wifi_dbm = None          # last known WiFi dBm; None = no WiFi / not yet read
+        self._wifi_dbm  = None          # last known WiFi dBm; None = no WiFi / not yet read
+        self._wifi_pct  = None          # last known WiFi quality %; None = no WiFi / not yet read
         self._open_windows = []  # track open tkinter windows for clean exit
 
         self.icon = None
@@ -538,7 +539,7 @@ class TrayMonitor:
         info = self._get_battery_info() if psutil else None
         msg = f"{HOSTNAME}: {status}"
         if info:
-            msg += f" — Battery {info['percent']}% {'(Plugged)' if info['plugged'] else ''}"
+            msg += f" — Battery {info['percent']}% {'(Charging)' if info['plugged'] else ''}"
         # include time since last low-battery alert if available
         try:
             last = self._last_alert_time
@@ -615,8 +616,7 @@ class TrayMonitor:
             if result is None:
                 self._notify("No graph data available for today.")
                 return
-            fig, ax, plot_times, plot_battery, plot_cpu = result
-
+            fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi = result
             win = tk.Tk()
             self._open_windows.append(win)
             win.title(f"Battery Graph \u2014 {date_str}")
@@ -653,7 +653,7 @@ class TrayMonitor:
                     return
                 # Cursor outside the data range entirely → no data
                 if t < plot_times[0] or t > plot_times[-1]:
-                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A")
+                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A")
                     return
                 # Binary search for the two plot points that bracket the cursor time.
                 # plot_times includes NaN sentinel datetimes at gap midpoints, so the
@@ -666,15 +666,16 @@ class TrayMonitor:
                 in_gap = (isinstance(bat_l, float) and math.isnan(bat_l)) or \
                          (isinstance(bat_r, float) and math.isnan(bat_r))
                 if in_gap:
-                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A")
+                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A")
                 else:
                     # Snap to whichever bracketing point is closer
                     if abs((plot_times[i] - t).total_seconds()) <= abs((plot_times[i + 1] - t).total_seconds()):
-                        pt, bat, cpu = plot_times[i], bat_l, plot_cpu[i]
+                        pt, bat, cpu, wif = plot_times[i], bat_l, plot_cpu[i], plot_wifi[i]
                     else:
-                        pt, bat, cpu = plot_times[i + 1], bat_r, plot_cpu[i + 1]
+                        pt, bat, cpu, wif = plot_times[i + 1], bat_r, plot_cpu[i + 1], plot_wifi[i + 1]
+                    wifi_str = f"{wif:.0f}%" if (wif is not None and not math.isnan(wif)) else "N/A"
                     status_var.set(
-                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%"
+                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}"
                     )
 
             canvas.mpl_connect('motion_notify_event', on_motion)
@@ -744,7 +745,7 @@ class TrayMonitor:
             #    finalizes Variable.__del__ immediately on this thread.
             try:
                 del status_bar, status_var, toolbar, canvas, fig, ax
-                del plot_times, plot_battery, plot_cpu
+                del plot_times, plot_battery, plot_cpu, plot_wifi
             except Exception:
                 pass
 
@@ -793,7 +794,7 @@ class TrayMonitor:
         threshold = int(self.config.get('threshold', 20))
         if self.config.get('telegram_enabled'):
             if info:
-                exit_msg = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Plugged' if info['plugged'] else '⚡ Unplugged'}"
+                exit_msg = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             else:
                 exit_msg = "⏹️ Monitoring stopped"
             try:
@@ -804,7 +805,7 @@ class TrayMonitor:
         
         # Send exit notification
         if info:
-            self._notify(f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Plugged' if info['plugged'] else '⚡ Unplugged'}")
+            self._notify(f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}")
         else:
             self._notify("⏹️ Monitoring stopped")
         
@@ -838,7 +839,7 @@ class TrayMonitor:
             logging.error(f"Error getting battery info: {e}")
             return None
         secs = bat.secsleft
-        if secs == psutil.POWER_TIME_UNKNOWN or secs == psutil.POWER_TIME_UNLIMITED:
+        if secs < 0 or secs == 0xFFFFFFFF or secs == psutil.POWER_TIME_UNKNOWN or secs == psutil.POWER_TIME_UNLIMITED:
             time_left = None
         else:
             hours = secs // 3600
@@ -873,15 +874,16 @@ class TrayMonitor:
                 else:
                     status_line = "WiFi: not connected"
                 ranges = (
-                    "\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
+                    #"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
                     "Signal ranges:\n"
                     "  \u2265 \u221255 dBm  \u2192  Excellent\n"
                     "  \u2265 \u221265 dBm  \u2192  Good\n"
                     "  \u2265 \u221275 dBm  \u2192  Fair\n"
-                    "  < \u221275 dBm   \u2192  Poor"
+                    "  < \u221275 dBm  \u2192  Poor"
                 )
                 self.wifi_icon.icon = image
-                self.wifi_icon.title = f"{status_line}\n{ranges}"
+                tooltip = f"{status_line}\n{ranges}"
+                self.wifi_icon.title = tooltip[:128]
         except Exception as e:
             logging.debug(f"Failed to update wifi icon: {e}")
 
@@ -911,7 +913,8 @@ class TrayMonitor:
         except Exception as e:
             logging.error(f"Failed to rotate logs: {e}")
 
-    def _write_csv_row(self, timestamp, battery_percent, cpu_percent, charging):
+    def _write_csv_row(self, timestamp, battery_percent, cpu_percent, charging,
+                        wifi_dbm=None, wifi_pct=None):
         """Append a data row to today's dated CSV file, writing the header on first creation."""
         date_str = timestamp[:10]  # 'YYYY-MM-DD'
         csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
@@ -920,13 +923,16 @@ class TrayMonitor:
             with open(csv_path, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 if not file_exists:
-                    writer.writerow(['timestamp', 'battery_percent', 'cpu_percent', 'charging'])
-                writer.writerow([timestamp, battery_percent, cpu_percent, charging])
+                    writer.writerow(['timestamp', 'battery_percent', 'cpu_percent', 'charging',
+                                     'wifi_dbm', 'wifi_pct'])
+                writer.writerow([timestamp, battery_percent, cpu_percent, charging,
+                                 wifi_dbm if wifi_dbm is not None else '',
+                                 wifi_pct if wifi_pct is not None else ''])
         except Exception as e:
             logging.error(f"Failed to write CSV log: {e}")
 
     def _build_graph_figure(self, date_str):
-        """Load CSV data and build a matplotlib figure. Returns (fig, ax, plot_times, plot_battery, plot_cpu) or None."""
+        """Load CSV data and build a matplotlib figure. Returns (fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi) or None."""
         if plt is None:
             logging.warning("matplotlib not available; skipping graph generation")
             return None
@@ -952,23 +958,32 @@ class TrayMonitor:
             battery = [float(r['battery_percent']) for r in rows]
             cpu = [float(r['cpu_percent']) for r in rows]
             charging = [str(r.get('charging', 'false')).strip().lower() in ('true', '1', 'yes') for r in rows]
+            def _safe_float(v):
+                try:
+                    return float(v) if v not in (None, '') else math.nan
+                except (ValueError, TypeError):
+                    return math.nan
+            wifi_pct_raw = [_safe_float(r.get('wifi_pct', '')) for r in rows]
+            has_wifi = any(not math.isnan(v) for v in wifi_pct_raw)
 
             # Insert NaN breaks where the gap between consecutive points exceeds
             # 2× the data_log_interval (computer was likely asleep or stopped).
             gap_threshold_s = int(self.config.get('data_log_interval', 60)) * 2
-            plot_times, plot_battery, plot_cpu = [], [], []
+            plot_times, plot_battery, plot_cpu, plot_wifi = [], [], [], []
             for i in range(len(times)):
                 plot_times.append(times[i])
                 plot_battery.append(battery[i])
                 plot_cpu.append(cpu[i])
+                plot_wifi.append(wifi_pct_raw[i])
                 if i + 1 < len(times):
                     gap = (times[i + 1] - times[i]).total_seconds()
                     if gap > gap_threshold_s:
                         plot_times.append(times[i] + datetime.timedelta(seconds=gap / 2))
                         plot_battery.append(math.nan)
                         plot_cpu.append(math.nan)
+                        plot_wifi.append(math.nan)
 
-            fig = matplotlib.figure.Figure(figsize=(14, 5))
+            fig = matplotlib.figure.Figure(figsize=(14, 7.5))
             ax = fig.add_subplot(1, 1, 1)
 
             # Shade background: light yellow for discharging, light green for charging
@@ -987,6 +1002,9 @@ class TrayMonitor:
 
             ax.plot(plot_times, plot_battery, label='Battery %', color='steelblue', linewidth=3.0)
             ax.plot(plot_times, plot_cpu, label='CPU %', color='tomato', linewidth=1.2, alpha=0.85)
+            if has_wifi:
+                ax.plot(plot_times, plot_wifi, label='WiFi %', color='mediumorchid',
+                        linewidth=1.5, alpha=0.85, linestyle='--')
             ax.set_ylim(0, 105)
             ax.set_ylabel('Percent (%)')
             ax.set_xlabel('Time')
@@ -995,16 +1013,26 @@ class TrayMonitor:
             legend_elements = [
                 plt.Line2D([0], [0], color='steelblue', linewidth=3.0, label='Battery %'),
                 plt.Line2D([0], [0], color='tomato', linewidth=1.2, label='CPU %'),
+            ]
+            if has_wifi:
+                legend_elements.append(
+                    plt.Line2D([0], [0], color='mediumorchid', linewidth=1.5,
+                               linestyle='--', label='WiFi %')
+                )
+            legend_elements += [
                 Patch(facecolor='#fffde7', edgecolor='gray', alpha=0.9, label='Discharging'),
                 Patch(facecolor='green', alpha=0.35, label='Charging'),
             ]
-            ax.legend(handles=legend_elements, loc='upper right')
-            ax.set_title(f'Battery & CPU — {date_str} — {HOSTNAME}')
-            ax.set_xlim(times[0], times[-1])
+            ax.legend(handles=legend_elements, loc='upper center',
+                      bbox_to_anchor=(0.5, -0.18), ncol=len(legend_elements),
+                      frameon=True, fontsize=9)
+            ax.set_title(f'Battery, CPU, Wifi — {date_str} — {HOSTNAME}')
+            if times[0] != times[-1]:
+                ax.set_xlim(times[0], times[-1])
             ax.grid(True, axis='y', alpha=0.3)
             ax.grid(True, axis='x', alpha=0.07)
-            fig.tight_layout()
-            return fig, ax, plot_times, plot_battery, plot_cpu
+            fig.tight_layout(rect=[0, 0.08, 1, 1])
+            return fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi
         except Exception as e:
             logging.error(f"Failed to build graph figure for {date_str}: {e}")
             return None
@@ -1014,7 +1042,7 @@ class TrayMonitor:
         result = self._build_graph_figure(date_str)
         if result is None:
             return None
-        fig, ax, plot_times, plot_battery, plot_cpu = result
+        fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi = result
         try:
             graph_path = os.path.join(ROOT_DIR, f'battery_log_{date_str}.png')
             fig.savefig(graph_path, dpi=100)
@@ -1072,7 +1100,7 @@ class TrayMonitor:
                 drive = part.device.rstrip('\\').rstrip('/')
                 logging.info(f"Disk check: {drive} at {pct:.1f}%")
                 if pct >= threshold:
-                    msg = f"{ALERT_BORDER}\n💾 Drive {drive} at {pct:.0f}% (Threshold alert {threshold}%) - {free_gb:.1f} GB free of {total_gb:.0f} GB\n{ALERT_BORDER}"
+                    msg = f"{ALERT_BORDER}\n💽 Drive {drive} at {pct:.0f}% (Threshold alert {threshold}%) - {free_gb:.1f} GB free of {total_gb:.0f} GB\n{ALERT_BORDER}"
                     logging.warning(msg)
                     if self.config.get('telegram_enabled'):
                         send_telegram_async(msg, conf=conf)
@@ -1130,7 +1158,8 @@ class TrayMonitor:
                     cpu_interval = 1 if self._last_csv_time is None else None
                     cpu_percent = psutil.cpu_percent(interval=cpu_interval) if psutil else 0.0
                     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self._write_csv_row(timestamp, percent, cpu_percent, plugged)
+                    self._write_csv_row(timestamp, percent, cpu_percent, plugged,
+                                         wifi_dbm=self._wifi_dbm, wifi_pct=self._wifi_pct)
                     self._last_csv_time = now
 
                 # Update battery icon
@@ -1140,8 +1169,9 @@ class TrayMonitor:
                 wifi_poll_counter += 1
                 if wifi_poll_counter >= WIFI_POLL_INTERVAL:
                     wifi_poll_counter = 0
-                    dbm, _pct = _get_wifi_dbm()
+                    dbm, pct_wifi = _get_wifi_dbm()
                     self._wifi_dbm = dbm
+                    self._wifi_pct = pct_wifi
                     self._update_wifi_icon(dbm)
                 
                 if (not plugged) and (percent <= threshold):
@@ -1169,10 +1199,10 @@ class TrayMonitor:
                         if duration is not None:
                             mins = duration // 60
                             secs = duration % 60
-                            dur_text = f"Was low for {mins}m {secs}s"
+                            dur_text = f"Was under threshold for {mins}m {secs}s"
                         else:
                             dur_text = ""
-                        rec_msg = f"� Battery recovered: {percent}% (Alert at {threshold}%)"
+                        rec_msg = f"✅ Battery recovered: {percent}% (Alert at {threshold}%)"
                         if dur_text:
                             rec_msg += f"\n{dur_text}"
                         if self.config.get('telegram_enabled'):
@@ -1245,7 +1275,7 @@ if __name__ == '__main__':
         threshold = int(cfg.get('threshold', 20))
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if info:
-            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Plugged' if info['plugged'] else '⚡ Unplugged'}"
+            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             if info.get('time_left'):
                 startup_msg += f"\n⏱️ ~{info['time_left']} remaining"
         else:

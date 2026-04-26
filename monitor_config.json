@@ -6,6 +6,9 @@
   "logging_enabled": true,
   "data_log_interval": 60,
   "data_log_retention_days": 30,
+  "disk_alert_enabled": true,
+  "disk_alert_threshold": 90,
+  "disk_alert_time": "06:00",
   "resend_minutes": 5,
   "start_minimized": false
 }
