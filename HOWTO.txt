@@ -18,9 +18,7 @@ copy "C:\Users\Adi\OneDrive\Desktop\# PROJECTS\Laptop Battery Monitor\dist\lapto
 
 Start-Process .\dist\laptop_battery_monitor.exe
 
-Searched for text `dbm` (`**/laptop_battery_monitor.py`), 20 results
-
-Read [](file:///c%3A/Users/Adi/OneDrive/Desktop/%23%20PROJECTS/Laptop%20Battery%20Monitor/laptop_battery_monitor.py#173-173), lines 173 to 195
+=== Wifi
 
 The percentage formula is `min(100, max(0, 2 * (dbm + 100)))`:
 
@@ -31,3 +29,51 @@ The percentage formula is `min(100, max(0, 2 * (dbm + 100)))`:
 | ≥ −75 | ≥ 50% | Fair | Dark orange |
 | < −75 | < 50% | Poor | Red |
 | −100 | 0% | — | Grey (no WiFi) |
+
+=== TODO
+
+DONE - Embed the version in the executable to be able to track what runs
+- Option to disable notifications (e.g. on Rafael's computer)
+- Fix title of graph window
+- Fix icon of graph window
+- Change name from Laptop Battery Monitor to Laptop Monitor or Monitor
+- Moni/Rares/etc sa instaleze pe laptop
+
+=== INFO
+
+ICONS = {
+    # Status / Info
+    "info": "ℹ️",
+    "info_blue": "🔵",
+    "info_circle": "ⓘ",
+    "details": "🛈",
+
+    # Success
+    "success": "✅",
+    "ok": "✔️",
+    "green": "🟢",
+
+    # Warning
+    "warning": "⚠️",
+    "alert": "❗",
+    "alert_red": "⛔",
+    "critical": "❗❗",
+
+    # Error / Stop
+    "error": "❌",
+    "stop": "🛑",
+    "halt": "⏹️",
+    "cross": "✖️",
+
+    # Monitoring / Activity
+    "start": "▶️",
+    "pause": "⏸️",
+    "active": "🔄",
+    "stop_monitor": "⏹️",
+
+    # System / Tools
+    "settings": "⚙️",
+    "terminal": "💻",
+    "network": "🌐",
+    "disk": "💾",
+}
