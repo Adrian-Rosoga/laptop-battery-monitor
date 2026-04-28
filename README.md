@@ -11,12 +11,11 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **Low-battery Telegram alerts** — fires when battery drops below a configurable threshold; repeats on a configurable interval until resolved
 - **Battery-recovered notification** — sent when the laptop is plugged back in or battery rises above threshold
 - **Daily disk space check** — checks all local drives at a configurable time and alerts if any drive exceeds a usage threshold
-- **Daily battery & CPU graph** — interactive window with zoom/pan and cursor readout; also sent automatically via Telegram at midnight and on startup
+- **Daily battery & CPU graph** — interactive window (opens maximised) with zoom/pan and cursor readout; Today and Yesterday graphs accessible from tray menu; also sent automatically via Telegram at midnight and on startup
 - **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
-- **About dialog** with GitHub link
-
-### WiFi signal quality bands
+- **Resilient Telegram delivery** — automatic retry with exponential backoff (5 s → 15 s → 45 s) on transient network errors (DNS failures, timeouts)
+- **Custom window icon** — graph window uses `laptop_battery_monitor.ico` instead of the default Tk feather
 
 | dBm | Quality |
 |-----|---------|
@@ -160,7 +159,7 @@ Copy-Item dist\laptop_battery_monitor.exe MyDist\
 **Startup:**
 ```
 [GramAdi]
-▶️ Battery Monitor v1.9.
+▶️ Battery Monitor v2.0.
 
 Battery 40% (Alert at 30%) - Charging
 C: at 89.7% - 95.8 GB free of 929 GB

@@ -70,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "1.9"
+__version__ = "2.0"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
@@ -365,17 +365,25 @@ def _resolve_telegram_conf(conf=None):
     return None
 
 
-def send_telegram_async(message, conf=None):
+def send_telegram_async(message, conf=None, retries=3, retry_base_delay=5):
+    """Send a Telegram message with automatic retry and exponential backoff on transient network errors."""
     import asyncio
-    try:
-        full = f"[{HOSTNAME}]\n{message}"
-        resolved = _resolve_telegram_conf(conf)
-        if resolved:
-            asyncio.run(telegram_send.send(messages=[full], conf=resolved))
-        else:
-            asyncio.run(telegram_send.send(messages=[full]))
-    except Exception as e:
-        logging.error(f"Failed to send Telegram message: {e}")
+    full = f"[{HOSTNAME}]\n{message}"
+    resolved = _resolve_telegram_conf(conf)
+    for attempt in range(1, retries + 1):
+        try:
+            if resolved:
+                asyncio.run(telegram_send.send(messages=[full], conf=resolved))
+            else:
+                asyncio.run(telegram_send.send(messages=[full]))
+            return  # success
+        except Exception as e:
+            if attempt < retries:
+                delay = retry_base_delay * (3 ** (attempt - 1))  # 5s, 15s, 45s
+                logging.warning(f"Telegram send attempt {attempt}/{retries} failed ({e}); retrying in {delay}s")
+                time.sleep(delay)
+            else:
+                logging.error(f"Failed to send Telegram message after {retries} attempts: {e}")
 
 
 class SettingsWindow:
@@ -498,7 +506,8 @@ class TrayMonitor:
             menu = pystray.Menu(
                 pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._running),
                 pystray.MenuItem('Show Status', self.show_status),
-                pystray.MenuItem('Show Graph', self.show_graph, default=True),
+                pystray.MenuItem('Show Graph - Today', lambda icon, item: self.show_graph(), default=True),
+                pystray.MenuItem('Show Graph - Yesterday', lambda icon, item: self.show_graph_yesterday()),
                 pystray.MenuItem('Settings', self.open_settings),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
@@ -598,29 +607,39 @@ class TrayMonitor:
         
         threading.Thread(target=_show_about, daemon=True).start()
 
-    def show_graph(self, icon=None, item=None):
-        """Show the battery graph for today in an interactive popup with zoom/pan and cursor values."""
+    def show_graph(self, icon=None, item=None, date_str=None):
+        """Show the battery graph for the given date (default: today) in an interactive popup."""
         if tk is None:
             self._notify("tkinter not available; cannot show graph.")
             return
 
         def _show():
             import math
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-            date_str = datetime.date.today().strftime('%Y-%m-%d')
+            nonlocal date_str
+            if date_str is None:
+                date_str = datetime.date.today().strftime('%Y-%m-%d')
             csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
             logging.info(f"Show Graph: using data file {csv_path}")
 
             result = self._build_graph_figure(date_str)
             if result is None:
-                self._notify("No graph data available for today.")
+                self._notify("No data available.")
                 return
+
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
             fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi = result
             win = tk.Tk()
             self._open_windows.append(win)
-            win.title(f"Battery Graph \u2014 {date_str}")
+            win.title(f"Monitor \u2014 {date_str}")
+            ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+            if os.path.isfile(ico_path):
+                try:
+                    win.iconbitmap(ico_path)
+                except Exception:
+                    pass
             win.attributes("-topmost", True)
+            win.state('zoomed')
 
             # Resize figure to screen width
             screen_w = win.winfo_screenwidth()
@@ -756,6 +775,11 @@ class TrayMonitor:
             win.destroy()
 
         threading.Thread(target=_show, daemon=True).start()
+
+    def show_graph_yesterday(self, icon=None, item=None):
+        """Show the battery graph for yesterday."""
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        self.show_graph(date_str=yesterday)
 
     def open_settings(self, icon=None, item=None):
         if tk is None:
@@ -1053,8 +1077,8 @@ class TrayMonitor:
         finally:
             fig.clf()
 
-    def _send_graph_telegram(self, graph_path, date_str):
-        """Send the daily graph image via Telegram."""
+    def _send_graph_telegram(self, graph_path, date_str, retries=3, retry_base_delay=5):
+        """Send the daily graph image via Telegram, with retry and exponential backoff on transient network errors."""
         if not self.config.get('telegram_enabled'):
             return
         if not graph_path or not os.path.isfile(graph_path):
@@ -1062,16 +1086,23 @@ class TrayMonitor:
         import asyncio
         caption = f"[{HOSTNAME}] 📊 Daily battery & CPU report for {date_str}"
         conf = _resolve_telegram_conf(self.config.get('telegram_conf'))
-        try:
-            async def _send():
-                with open(graph_path, 'rb') as f:
-                    if conf:
-                        await telegram_send.send(images=[f], captions=[caption], conf=conf)
-                    else:
-                        await telegram_send.send(images=[f], captions=[caption])
-            asyncio.run(_send())
-        except Exception as e:
-            logging.error(f"Failed to send graph via Telegram: {e}")
+        for attempt in range(1, retries + 1):
+            try:
+                async def _send():
+                    with open(graph_path, 'rb') as f:
+                        if conf:
+                            await telegram_send.send(images=[f], captions=[caption], conf=conf)
+                        else:
+                            await telegram_send.send(images=[f], captions=[caption])
+                asyncio.run(_send())
+                return  # success
+            except Exception as e:
+                if attempt < retries:
+                    delay = retry_base_delay * (3 ** (attempt - 1))  # 5s, 15s, 45s
+                    logging.warning(f"Graph Telegram send attempt {attempt}/{retries} failed ({e}); retrying in {delay}s")
+                    time.sleep(delay)
+                else:
+                    logging.error(f"Failed to send graph via Telegram after {retries} attempts: {e}")
 
     def _generate_and_send_graph(self, date_str):
         """Generate the daily graph and send it via Telegram."""
