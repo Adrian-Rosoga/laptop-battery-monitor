@@ -895,6 +895,10 @@ class TrayMonitor:
         if self.config.get('telegram_enabled'):
             if info:
                 exit_msg = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
+                if self._wifi_pct is not None:
+                    exit_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                if self._mem_pressure is not None:
+                    exit_msg += f"\n🧠 MPI {self._mem_pressure:.1f}%"
             else:
                 exit_msg = "⏹️ Monitoring stopped"
             try:
@@ -905,7 +909,12 @@ class TrayMonitor:
         
         # Send exit notification
         if info:
-            self._notify(f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}")
+            stop_note = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
+            if self._wifi_pct is not None:
+                stop_note += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+            if self._mem_pressure is not None:
+                stop_note += f"\n🧠 MPI {self._mem_pressure:.1f}%"
+            self._notify(stop_note)
         else:
             self._notify("⏹️ Monitoring stopped")
         
@@ -1112,10 +1121,7 @@ class TrayMonitor:
                         linewidth=1.5, alpha=0.85, linestyle='--')
             if has_mem:
                 ax.plot(plot_times, plot_mem, label='MPI %', color='darkorange',
-                        linewidth=1.5, alpha=0.85, linestyle=':')
-            if has_mem:
-                ax.plot(plot_times, plot_mem, label='MPI %', color='darkorange',
-                        linewidth=1.5, alpha=0.85, linestyle=':')
+                        linewidth=1.5, alpha=0.85, linestyle=(0, (8, 4)))
             ax.set_ylim(0, 105)
             ax.set_ylabel('Percent (%)')
             ax.set_xlabel('Time')
@@ -1133,12 +1139,7 @@ class TrayMonitor:
             if has_mem:
                 legend_elements.append(
                     plt.Line2D([0], [0], color='darkorange', linewidth=1.5,
-                               linestyle=':', label='MPI %')
-                )
-            if has_mem:
-                legend_elements.append(
-                    plt.Line2D([0], [0], color='darkorange', linewidth=1.5,
-                               linestyle=':', label='MPI %')
+                               linestyle=(0, (8, 4)), label='MPI %')
                 )
             legend_elements += [
                 Patch(facecolor='#fffde7', edgecolor='gray', alpha=0.9, label='Discharging'),
@@ -1311,6 +1312,10 @@ class TrayMonitor:
                         msg = f"{ALERT_BORDER}\n🪫 Battery low: {percent}% (Alert at {threshold}%)\n⚡ Unplugged"
                         if time_left:
                             msg += f"\n⏱️ ~{time_left} remaining"
+                        if self._wifi_pct is not None:
+                            msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                        if self._mem_pressure is not None:
+                            msg += f"\n🧠 MPI {self._mem_pressure:.1f}%"
                         msg += f"\n{ALERT_BORDER}"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
@@ -1336,6 +1341,10 @@ class TrayMonitor:
                         rec_msg = f"✅ Battery recovered: {percent}% (Alert at {threshold}%)"
                         if dur_text:
                             rec_msg += f"\n{dur_text}"
+                        if self._wifi_pct is not None:
+                            rec_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                        if self._mem_pressure is not None:
+                            rec_msg += f"\n🧠 MPI {self._mem_pressure:.1f}%"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(rec_msg, conf=self.config.get('telegram_conf'))
                         self._notify(rec_msg)
@@ -1409,6 +1418,12 @@ if __name__ == '__main__':
             startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             if info.get('time_left'):
                 startup_msg += f"\n⏱️ ~{info['time_left']} remaining"
+            _w_dbm, _w_pct = _get_wifi_dbm()
+            if _w_pct is not None:
+                startup_msg += f"\n📶 WiFi {_w_pct:.0f}% ({_w_dbm} dBm)"
+            _mpi, _ = get_memory_pressure()
+            if _mpi is not None:
+                startup_msg += f"\n🧠 MPI {_mpi:.1f}%"
         else:
             startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}"
         disk_lines = monitor._disk_summary_lines()
