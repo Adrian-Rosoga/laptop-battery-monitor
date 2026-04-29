@@ -70,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "2.2"
+__version__ = "2.3"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
@@ -483,6 +483,22 @@ def _fetch_telegram_updates(token, offset, timeout=25):
         return [], offset
 
 
+def _wifi_quality_label(pct):
+    """Return a short quality label for a WiFi percentage value."""
+    if pct >= 90:   return "Excellent"
+    elif pct >= 75: return "Good"
+    elif pct >= 50: return "Fair"
+    else:           return "Poor"
+
+
+def _mpi_label(mpi):
+    """Return a short meaning label for a Memory Pressure Index value."""
+    if mpi < 30:   return "Normal"
+    elif mpi < 60: return "Moderate"
+    elif mpi < 80: return "High"
+    else:          return "Critical"
+
+
 def send_telegram_async(message, conf=None, retries=3, retry_base_delay=5):
     """Send a Telegram message with automatic retry and exponential backoff on transient network errors."""
     import asyncio
@@ -513,8 +529,14 @@ class SettingsWindow:
             raise RuntimeError("tkinter not available")
 
         self.root = tk.Tk()
-        self.root.title("Battery Monitor Settings")
+        self.root.title("Laptop Monitor Settings")
         self.root.geometry("320x560")
+        ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+        if os.path.isfile(ico_path):
+            try:
+                self.root.iconbitmap(ico_path)
+            except Exception:
+                pass
 
         tk.Label(self.root, text="Low battery threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
         self.threshold_var = tk.StringVar(value=str(self.config.get('threshold', 20)))
@@ -627,14 +649,14 @@ class TrayMonitor:
             image = make_icon_image(size=512, percentage=100, plugged=True)
             menu = pystray.Menu(
                 pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._running),
-                pystray.MenuItem('Show Status', self.show_status),
+                pystray.MenuItem('Status', self.show_status),
                 pystray.MenuItem('Show Graph - Today', lambda icon, item: self.show_graph(), default=True),
                 pystray.MenuItem('Show Graph - Yesterday', lambda icon, item: self.show_graph_yesterday()),
                 pystray.MenuItem('Settings', self.open_settings),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
             )
-            self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Battery Monitor v{__version__}: {HOSTNAME}", menu)
+            self.icon = pystray.Icon(f"monitor_{HOSTNAME}", image, f"Laptop Monitor v{__version__}: {HOSTNAME}", menu)
             wifi_image = make_wifi_icon_image(size=512, dbm=None)
             self.wifi_icon = pystray.Icon(f"wifi_{HOSTNAME}", wifi_image, "WiFi")
 
@@ -674,8 +696,23 @@ class TrayMonitor:
         info = self._get_battery_info() if psutil else None
         msg = f"{HOSTNAME}: {status}"
         if info:
-            msg += f" — Battery {info['percent']}% {'(Charging)' if info['plugged'] else ''}"
-        # include time since last low-battery alert if available
+            threshold = int(self.config.get('threshold', 20))
+            msg += f"\n🔋 Battery {info['percent']}% (Alert at {threshold}%)"
+            msg += f"\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
+            if info.get('time_left'):
+                msg += f"\n⏱️ ~{info['time_left']} remaining"
+        if self._wifi_pct is not None:
+            msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
+        else:
+            msg += "\n📶 WiFi N/A"
+        if self._mem_pressure is not None:
+            msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
+        if psutil:
+            cpu = psutil.cpu_percent(interval=None)
+            msg += f"\n🖥️ CPU {cpu:.1f}%"
+        disk_lines = self._disk_summary_lines()
+        if disk_lines:
+            msg += "\n" + "\n".join(disk_lines)
         try:
             last = self._last_alert_time
             if last is not None:
@@ -698,13 +735,19 @@ class TrayMonitor:
             about_window.title("About")
             about_window.geometry("400x320")
             about_window.resizable(False, False)
+            ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+            if os.path.isfile(ico_path):
+                try:
+                    about_window.iconbitmap(ico_path)
+                except Exception:
+                    pass
             
             # Title and version
-            title_label = tk.Label(about_window, text=f"Laptop Battery Monitor v{__version__}", font=("Arial", 12, "bold"))
+            title_label = tk.Label(about_window, text=f"Laptop Monitor v{__version__}", font=("Arial", 12, "bold"))
             title_label.pack(pady=10)
             
             # Description
-            desc_label = tk.Label(about_window, text="Monitors battery status and sends Telegram alerts when low.\nConfigurable threshold, interval and Telegram integration.", justify=tk.CENTER)
+            desc_label = tk.Label(about_window, text="Monitors battery, WiFi, CPU and memory — sends Telegram\nalerts and graphs. Configurable thresholds and intervals.", justify=tk.CENTER)
             desc_label.pack(pady=5)
             
             # Clickable GitHub link
@@ -782,15 +825,30 @@ class TrayMonitor:
             # Suppress the default "(x, y)" coordinate display in the toolbar
             toolbar.set_message = lambda msg: None
 
+            # --- Cursor overlay: vertical line + intersection dots ---
+            vline = ax.axvline(x=plot_times[0], color='gray', linewidth=0.8,
+                               linestyle='--', alpha=0.7, visible=False, zorder=5)
+            dot_bat,  = ax.plot([], [], 'o', color='steelblue',    ms=7, zorder=6, visible=False)
+            dot_cpu,  = ax.plot([], [], 'o', color='tomato',       ms=7, zorder=6, visible=False)
+            dot_wifi, = ax.plot([], [], 'o', color='mediumorchid', ms=7, zorder=6, visible=False)
+            dot_mem,  = ax.plot([], [], 'o', color='darkorange',   ms=7, zorder=6, visible=False)
+            _cursor_artists = [vline, dot_bat, dot_cpu, dot_wifi, dot_mem]
+
             # Status bar showing nearest data point values under cursor
             status_var = tk.StringVar(value="  Move cursor over graph to see values")
             status_bar = tk.Label(win, textvariable=status_var, anchor='w',
                                   relief=tk.SUNKEN, font=("Courier", 14, "bold"), padx=6)
             status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
+            def _hide_cursor():
+                for a in _cursor_artists:
+                    a.set_visible(False)
+                canvas.draw_idle()
+
             def on_motion(event):
                 if event.inaxes != ax or event.xdata is None:
                     status_var.set("  Move cursor over graph to see values")
+                    _hide_cursor()
                     return
                 t = mdates.num2date(event.xdata).replace(tzinfo=None)
                 n = len(plot_times)
@@ -799,6 +857,7 @@ class TrayMonitor:
                 # Cursor outside the data range entirely → no data
                 if t < plot_times[0] or t > plot_times[-1]:
                     status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A    MPI: N/A")
+                    _hide_cursor()
                     return
                 # Binary search for the two plot points that bracket the cursor time.
                 # plot_times includes NaN sentinel datetimes at gap midpoints, so the
@@ -812,6 +871,7 @@ class TrayMonitor:
                          (isinstance(bat_r, float) and math.isnan(bat_r))
                 if in_gap:
                     status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A    MPI: N/A")
+                    _hide_cursor()
                 else:
                     # Snap to whichever bracketing point is closer
                     if abs((plot_times[i] - t).total_seconds()) <= abs((plot_times[i + 1] - t).total_seconds()):
@@ -821,20 +881,31 @@ class TrayMonitor:
                     wifi_str = f"{wif:.0f}%" if (wif is not None and not math.isnan(wif)) else "N/A"
                     mem_str  = f"{mem:.1f}%" if (mem is not None and not math.isnan(mem))  else "N/A"
                     if wif is not None and not math.isnan(wif):
-                        if wif >= 90:   wifi_str += " (Excellent)"
-                        elif wif >= 75: wifi_str += " (Good)"
-                        elif wif >= 50: wifi_str += " (Fair)"
-                        else:           wifi_str += " (Poor)"
+                        wifi_str += f" ({_wifi_quality_label(wif)})"
                     if mem is not None and not math.isnan(mem):
-                        if mem < 30:    mem_str += " (Normal)"
-                        elif mem < 60:  mem_str += " (Moderate)"
-                        elif mem < 80:  mem_str += " (High)"
-                        else:           mem_str += " (Critical)"
+                        mem_str += f" ({_mpi_label(mem)})"
                     status_var.set(
                         f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}    MPI: {mem_str}"
                     )
+                    # Update vertical line
+                    pt_num = mdates.date2num(pt)
+                    vline.set_xdata([pt_num, pt_num])
+                    vline.set_visible(True)
+                    # Update intersection dots
+                    dot_bat.set_data([pt_num], [bat])
+                    dot_bat.set_visible(True)
+                    dot_cpu.set_data([pt_num], [cpu])
+                    dot_cpu.set_visible(True)
+                    wif_ok = wif is not None and not math.isnan(wif)
+                    dot_wifi.set_data([pt_num], [wif] if wif_ok else [])
+                    dot_wifi.set_visible(wif_ok)
+                    mem_ok = mem is not None and not math.isnan(mem)
+                    dot_mem.set_data([pt_num], [mem] if mem_ok else [])
+                    dot_mem.set_visible(mem_ok)
+                    canvas.draw_idle()
 
             canvas.mpl_connect('motion_notify_event', on_motion)
+            canvas.mpl_connect('axes_leave_event', lambda e: (_hide_cursor(), status_var.set("  Move cursor over graph to see values")))
 
             def _close():
                 if win in self._open_windows:
@@ -902,6 +973,7 @@ class TrayMonitor:
             try:
                 del status_bar, status_var, toolbar, canvas, fig, ax
                 del plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem
+                del vline, dot_bat, dot_cpu, dot_wifi, dot_mem, _cursor_artists
             except Exception:
                 pass
 
@@ -957,9 +1029,9 @@ class TrayMonitor:
             if info:
                 exit_msg = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
                 if self._wifi_pct is not None:
-                    exit_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                    exit_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
                 if self._mem_pressure is not None:
-                    exit_msg += f"\n🧠 MPI {self._mem_pressure:.1f}%"
+                    exit_msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
             else:
                 exit_msg = "⏹️ Monitoring stopped"
             try:
@@ -972,9 +1044,9 @@ class TrayMonitor:
         if info:
             stop_note = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             if self._wifi_pct is not None:
-                stop_note += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                stop_note += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
             if self._mem_pressure is not None:
-                stop_note += f"\n🧠 MPI {self._mem_pressure:.1f}%"
+                stop_note += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
             self._notify(stop_note)
         else:
             self._notify("⏹️ Monitoring stopped")
@@ -1243,7 +1315,7 @@ class TrayMonitor:
         if not graph_path or not os.path.isfile(graph_path):
             return
         import asyncio
-        caption = f"[{HOSTNAME}] 📊 Daily battery & CPU report for {date_str}"
+        caption = f"[{HOSTNAME}] 📊 Daily report for {date_str}"
         conf = _resolve_telegram_conf(self.config.get('telegram_conf'))
         for attempt in range(1, retries + 1):
             try:
@@ -1374,9 +1446,9 @@ class TrayMonitor:
                         if time_left:
                             msg += f"\n⏱️ ~{time_left} remaining"
                         if self._wifi_pct is not None:
-                            msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                            msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
                         if self._mem_pressure is not None:
-                            msg += f"\n🧠 MPI {self._mem_pressure:.1f}%"
+                            msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
                         msg += f"\n{ALERT_BORDER}"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
@@ -1403,9 +1475,9 @@ class TrayMonitor:
                         if dur_text:
                             rec_msg += f"\n{dur_text}"
                         if self._wifi_pct is not None:
-                            rec_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm)"
+                            rec_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
                         if self._mem_pressure is not None:
-                            rec_msg += f"\n🧠 MPI {self._mem_pressure:.1f}%"
+                            rec_msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(rec_msg, conf=self.config.get('telegram_conf'))
                         self._notify(rec_msg)
@@ -1468,7 +1540,8 @@ class TrayMonitor:
                         logging.debug(f"Telegram poll: ignored message from chat_id={chat_id}")
                         continue
                     text = (msg.get('text') or '').strip().lower()
-                    if text == f"info {HOSTNAME.lower()}":
+                    parts = text.split()
+                    if len(parts) == 2 and parts[0] == 'info' and parts[1] == HOSTNAME.lower():
                         logging.info("Telegram poll: received info command")
                         threading.Thread(target=self._handle_info_command, daemon=True).start()
             except Exception as e:
@@ -1493,12 +1566,12 @@ class TrayMonitor:
                 msg += f"\n⏱️ ~{info['time_left']} remaining"
         dbm, pct = _get_wifi_dbm()
         if pct is not None:
-            msg += f"\n📶 WiFi {pct:.0f}% ({dbm} dBm)"
+            msg += f"\n📶 WiFi {pct:.0f}% ({dbm} dBm, {_wifi_quality_label(pct)})"
         else:
             msg += "\n📶 WiFi N/A"
         mpi, _ = get_memory_pressure()
         if mpi is not None:
-            msg += f"\n🧠 MPI {mpi:.1f}%"
+            msg += f"\n🧠 MPI {mpi:.1f}% ({_mpi_label(mpi)})"
         if psutil:
             cpu = psutil.cpu_percent(interval=1)
             msg += f"\n🖥️ CPU {cpu:.1f}%"
@@ -1528,7 +1601,13 @@ class TrayMonitor:
     def _notify(self, message):
         try:
             from plyer import notification
-            notification.notify(title="Battery Monitor", message=message, timeout=5)
+            ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+            notification.notify(
+                title=f"Laptop Monitor v{__version__}",
+                message=message,
+                app_icon=ico_path if os.path.isfile(ico_path) else None,
+                timeout=5,
+            )
             return
         except Exception as e:
             logging.debug(f"Failed to use plyer notification: {e}")
@@ -1543,6 +1622,15 @@ class TrayMonitor:
 
 
 if __name__ == '__main__':
+    # Override Windows App User Model ID so notifications show "Laptop Monitor"
+    # instead of "Python" in the notification title bar.
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            f'Laptop Monitor v{__version__}'
+        )
+    except Exception:
+        pass
+
     cfg = load_config()
     monitor = TrayMonitor(config=cfg)
     # start monitoring automatically on launch
@@ -1559,10 +1647,10 @@ if __name__ == '__main__':
                 startup_msg += f"\n⏱️ ~{info['time_left']} remaining"
             _w_dbm, _w_pct = _get_wifi_dbm()
             if _w_pct is not None:
-                startup_msg += f"\n📶 WiFi {_w_pct:.0f}% ({_w_dbm} dBm)"
+                startup_msg += f"\n📶 WiFi {_w_pct:.0f}% ({_w_dbm} dBm, {_wifi_quality_label(_w_pct)})"
             _mpi, _ = get_memory_pressure()
             if _mpi is not None:
-                startup_msg += f"\n🧠 MPI {_mpi:.1f}%"
+                startup_msg += f"\n🧠 MPI {_mpi:.1f}% ({_mpi_label(_mpi)})"
         else:
             startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}"
         disk_lines = monitor._disk_summary_lines()

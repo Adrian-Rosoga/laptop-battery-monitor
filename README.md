@@ -15,7 +15,8 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), Memory Pressure Index (MPI), charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
 - **Memory Pressure Index (MPI)** — composite 0–100% score logged and plotted on the graph; tracks when the system struggles with memory (see interpretation table below)
-- **Telegram remote query** — send `info <hostname>` from Telegram desktop to get a live stats snapshot + today's and yesterday's graphs on demand (see section below)
+- **Telegram remote query** — send `info <hostname>` from Telegram desktop to get a live stats snapshot + today's and yesterday's graphs on demand; hostname match is case-insensitive (see section below)
+- **Notification polish** — desktop popups now show "Laptop Monitor v…" as title (instead of "Python") with the app icon; WiFi quality label (Excellent/Good/Fair/Poor) and MPI meaning (Normal/Moderate/High/Critical) are included in all Telegram messages and notifications
 
 ### Memory Pressure Index (MPI)
 
@@ -204,7 +205,7 @@ Copy-Item dist\laptop_battery_monitor.exe MyDist\
 **Startup:**
 ```
 [GramAdi]
-▶️ Battery Monitor v2.1.
+▶️ Battery Monitor v2.3.
 
 Battery 40% (Alert at 30%) - Charging
 C: at 89.7% - 95.8 GB free of 929 GB
