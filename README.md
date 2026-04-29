@@ -2,6 +2,8 @@
 
 A lightweight Windows 11 system-tray application that monitors battery level, WiFi signal strength, CPU usage, and disk space — and sends Telegram alerts when thresholds are exceeded.
 
+> **v2.4** — Status window shows MPI sub-scores (RAM Used, Commit Ratio, Cache Depletion, NP Pool) in a tkinter dialog; all Telegram messages include the same sub-scores beneath the MPI line.
+
 ---
 
 ## Features
@@ -15,6 +17,8 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), Memory Pressure Index (MPI), charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
 - **Memory Pressure Index (MPI)** — composite 0–100% score logged and plotted on the graph; tracks when the system struggles with memory (see interpretation table below)
+- **MPI sub-scores** — four weighted components shown beneath the MPI line in the Status window and in all Telegram messages: RAM Used, Commit Ratio, Cache Depletion, NP Pool
+- **Status window** — "Status" tray menu item opens a tkinter dialog with full stats (no 256-char balloon-tip limit); includes battery, WiFi, MPI + sub-scores, CPU, disk, last-alert time
 - **Telegram remote query** — send `info <hostname>` from Telegram desktop to get a live stats snapshot + today's and yesterday's graphs on demand; hostname match is case-insensitive (see section below)
 - **Notification polish** — desktop popups now show "Laptop Monitor v…" as title (instead of "Python") with the app icon; WiFi quality label (Excellent/Good/Fair/Poor) and MPI meaning (Normal/Moderate/High/Critical) are included in all Telegram messages and notifications
 
@@ -53,7 +57,7 @@ Replace `GramAdi` with the exact hostname of your machine (case-insensitive). Th
 
 | Response | Content |
 |----------|---------|
-| Stats message | Battery %, charge state, time remaining, WiFi signal, MPI, CPU %, disk usage for all drives |
+| Stats message | Battery %, charge state, time remaining, WiFi signal, MPI + sub-scores (RAM Used, Commit Ratio, Cache Depletion, NP Pool), CPU %, disk usage for all drives |
 | Yesterday's graph | Daily battery/CPU/WiFi/MPI chart as an image |
 | Today's graph | Same for the current day |
 

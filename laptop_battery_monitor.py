@@ -70,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "2.3"
+__version__ = "2.4"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
@@ -233,11 +233,15 @@ def get_memory_pressure():
                0.15 * nppool_score) * 100
 
         return round(mpi, 1), {
-            'total_gb':         round(total     / 2**30, 2),
-            'available_gb':     round(available / 2**30, 2),
-            'committed_gb':     round(committed / 2**30, 2),
-            'cached_gb':        round(cached    / 2**30, 2),
-            'nonpaged_pool_mb': round(np_pool   / 2**20, 1),
+            'total_gb':           round(total     / 2**30, 2),
+            'available_gb':       round(available / 2**30, 2),
+            'committed_gb':       round(committed / 2**30, 2),
+            'cached_gb':          round(cached    / 2**30, 2),
+            'nonpaged_pool_mb':   round(np_pool   / 2**20, 1),
+            'ram_used_pct':       round(avail_score  * 100, 1),
+            'commit_ratio_pct':   round(commit_score * 100, 1),
+            'cache_depletion_pct':round(cache_score  * 100, 1),
+            'np_pool_pct':        round(nppool_score * 100, 1),
         }
     except Exception as e:
         logging.debug(f"get_memory_pressure failed: {e}")
@@ -499,7 +503,19 @@ def _mpi_label(mpi):
     else:          return "Critical"
 
 
-def send_telegram_async(message, conf=None, retries=3, retry_base_delay=5):
+def _mpi_substats_block(mem_stats):
+    """Return plain indented lines with the 4 MPI sub-scores, or '' if no stats."""
+    if not mem_stats:
+        return ""
+    return (
+        f"\n   RAM Used:        {mem_stats.get('ram_used_pct', 0):.1f}%"
+        f"\n   Commit Ratio:    {mem_stats.get('commit_ratio_pct', 0):.1f}%"
+        f"\n   Cache Depletion: {mem_stats.get('cache_depletion_pct', 0):.1f}%"
+        f"\n   NP Pool:         {mem_stats.get('np_pool_pct', 0):.1f}%"
+    )
+
+
+def send_telegram_async(message, conf=None, retries=3, retry_base_delay=5, parse_mode=None):
     """Send a Telegram message with automatic retry and exponential backoff on transient network errors."""
     import asyncio
     full = f"[{HOSTNAME}]\n{message}"
@@ -507,9 +523,9 @@ def send_telegram_async(message, conf=None, retries=3, retry_base_delay=5):
     for attempt in range(1, retries + 1):
         try:
             if resolved:
-                asyncio.run(telegram_send.send(messages=[full], conf=resolved))
+                asyncio.run(telegram_send.send(messages=[full], conf=resolved, parse_mode=parse_mode))
             else:
-                asyncio.run(telegram_send.send(messages=[full]))
+                asyncio.run(telegram_send.send(messages=[full], parse_mode=parse_mode))
             return  # success
         except Exception as e:
             if attempt < retries:
@@ -631,13 +647,14 @@ class TrayMonitor:
         self._last_alert_time = None
         self._low_start_time = None
         self._was_low = False
-        self._running = False
+        self._monitoring_enabled = False
         self._last_csv_time = None
         self._current_day = None
         self._disk_alert_sent_date = None
         self._wifi_dbm  = None          # last known WiFi dBm; None = no WiFi / not yet read
         self._wifi_pct  = None          # last known WiFi quality %; None = no WiFi / not yet read
         self._mem_pressure = None       # last known Memory Pressure Index (0-100)
+        self._mem_stats = {}            # last known MPI sub-scores and raw memory stats
         self._open_windows = []  # track open tkinter windows for clean exit
         self._poll_thread = None        # Telegram incoming-message polling thread
         self._info_cmd_lock = threading.Lock()
@@ -648,7 +665,7 @@ class TrayMonitor:
         if pystray:
             image = make_icon_image(size=512, percentage=100, plugged=True)
             menu = pystray.Menu(
-                pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._running),
+                pystray.MenuItem('Monitoring Enabled', self.toggle_monitoring, checked=lambda item: self._monitoring_enabled),
                 pystray.MenuItem('Status', self.show_status),
                 pystray.MenuItem('Show Graph - Today', lambda icon, item: self.show_graph(), default=True),
                 pystray.MenuItem('Show Graph - Yesterday', lambda icon, item: self.show_graph_yesterday()),
@@ -662,18 +679,18 @@ class TrayMonitor:
 
     def toggle_monitoring(self, icon=None, item=None):
         """Toggle monitoring on/off."""
-        if self._running:
+        if self._monitoring_enabled:
             self.stop_monitoring()
         else:
             self.start_monitoring()
 
     def start_monitoring(self, icon=None, item=None):
-        if self._running:
+        if self._monitoring_enabled:
             return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
-        self._running = True
+        self._monitoring_enabled = True
         self._notify(f"[{HOSTNAME}] ▶️ Battery monitoring started")
         # Rotate old CSV logs on startup
         threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
@@ -683,16 +700,16 @@ class TrayMonitor:
             self._poll_thread.start()
 
     def stop_monitoring(self, icon=None, item=None):
-        if not self._running:
+        if not self._monitoring_enabled:
             return
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=2)
-        self._running = False
+        self._monitoring_enabled = False
         self._notify(f"[{HOSTNAME}] ⏹️ Monitoring stopped")
 
     def show_status(self, icon=None, item=None):
-        status = "Running" if self._running else "Stopped"
+        status = "Monitoring enabled" if self._monitoring_enabled else "Monitoring disabled"
         info = self._get_battery_info() if psutil else None
         msg = f"{HOSTNAME}: {status}"
         if info:
@@ -707,9 +724,14 @@ class TrayMonitor:
             msg += "\n📶 WiFi N/A"
         if self._mem_pressure is not None:
             msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
+            if self._mem_stats:
+                msg += (f"\n   RAM Used:        {self._mem_stats.get('ram_used_pct', 0):.1f}%"
+                        f"\n   Commit Ratio:    {self._mem_stats.get('commit_ratio_pct', 0):.1f}%"
+                        f"\n   Cache Depletion: {self._mem_stats.get('cache_depletion_pct', 0):.1f}%"
+                        f"\n   NP Pool:         {self._mem_stats.get('np_pool_pct', 0):.1f}%")
         if psutil:
             cpu = psutil.cpu_percent(interval=None)
-            msg += f"\n🖥️ CPU {cpu:.1f}%"
+            msg += f"\n[CPU] {cpu:.1f}%"
         disk_lines = self._disk_summary_lines()
         if disk_lines:
             msg += "\n" + "\n".join(disk_lines)
@@ -722,7 +744,28 @@ class TrayMonitor:
                 msg += f"\nLast alert: {mins}m {s}s ago"
         except Exception as e:
             logging.debug(f"Error getting status info: {e}")
-        self._notify(msg)
+
+        if tk is not None:
+            def _show():
+                win = tk.Tk()
+                win.title("Status")
+                win.resizable(False, False)
+                ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+                if os.path.isfile(ico_path):
+                    try:
+                        win.iconbitmap(ico_path)
+                    except Exception:
+                        pass
+                lbl = tk.Label(win, text=msg, justify=tk.LEFT, font=("Consolas", 12), padx=16, pady=12)
+                lbl.pack()
+                btn = tk.Button(win, text="Close", command=win.quit, width=10)
+                btn.pack(pady=(0, 10))
+                win.protocol("WM_DELETE_WINDOW", win.quit)
+                win.mainloop()
+                win.destroy()
+            threading.Thread(target=_show, daemon=True).start()
+        else:
+            self._notify(msg)
 
     def show_about(self, icon=None, item=None):
         """Show About dialog with clickable GitHub link."""
@@ -1032,6 +1075,7 @@ class TrayMonitor:
                     exit_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
                 if self._mem_pressure is not None:
                     exit_msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
+                    exit_msg += _mpi_substats_block(self._mem_stats)
             else:
                 exit_msg = "⏹️ Monitoring stopped"
             try:
@@ -1281,7 +1325,7 @@ class TrayMonitor:
             ax.legend(handles=legend_elements, loc='upper center',
                       bbox_to_anchor=(0.5, -0.18), ncol=len(legend_elements),
                       frameon=True, fontsize=9)
-            ax.set_title(f'Battery, CPU, WiFi, MPI — {date_str} — {HOSTNAME}')
+            ax.set_title(f'Battery, CPU, WiFi, MPI — {date_str} — {HOSTNAME}  (press Esc to close)')
             if times[0] != times[-1]:
                 ax.set_xlim(times[0], times[-1])
             ax.grid(True, axis='y', alpha=0.3)
@@ -1419,7 +1463,7 @@ class TrayMonitor:
                     # interval=None on subsequent calls uses the delta from the previous call.
                     cpu_interval = 1 if self._last_csv_time is None else None
                     cpu_percent = psutil.cpu_percent(interval=cpu_interval) if psutil else 0.0
-                    mpi, _ = get_memory_pressure()
+                    mpi, self._mem_stats = get_memory_pressure()
                     self._mem_pressure = mpi
                     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     self._write_csv_row(timestamp, percent, cpu_percent, plugged,
@@ -1449,6 +1493,7 @@ class TrayMonitor:
                             msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
                         if self._mem_pressure is not None:
                             msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
+                            msg += _mpi_substats_block(self._mem_stats)
                         msg += f"\n{ALERT_BORDER}"
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(msg, conf=self.config.get('telegram_conf'))
@@ -1471,13 +1516,14 @@ class TrayMonitor:
                             dur_text = f"Was under threshold for {mins}m {secs}s"
                         else:
                             dur_text = ""
-                        rec_msg = f"✅ Battery recovered: {percent}% (Alert at {threshold}%)"
+                        rec_msg = f"✅ Battery above threshold or charging: {percent}% (Alert at {threshold}%)"
                         if dur_text:
                             rec_msg += f"\n{dur_text}"
                         if self._wifi_pct is not None:
                             rec_msg += f"\n📶 WiFi {self._wifi_pct:.0f}% ({self._wifi_dbm} dBm, {_wifi_quality_label(self._wifi_pct)})"
                         if self._mem_pressure is not None:
                             rec_msg += f"\n🧠 MPI {self._mem_pressure:.1f}% ({_mpi_label(self._mem_pressure)})"
+                            rec_msg += _mpi_substats_block(self._mem_stats)
                         if self.config.get('telegram_enabled'):
                             send_telegram_async(rec_msg, conf=self.config.get('telegram_conf'))
                         self._notify(rec_msg)
@@ -1541,7 +1587,7 @@ class TrayMonitor:
                         continue
                     text = (msg.get('text') or '').strip().lower()
                     parts = text.split()
-                    if len(parts) == 2 and parts[0] == 'info' and parts[1] == HOSTNAME.lower():
+                    if len(parts) == 2 and parts[0] == 'info' and parts[1] in HOSTNAME.lower():
                         logging.info("Telegram poll: received info command")
                         threading.Thread(target=self._handle_info_command, daemon=True).start()
             except Exception as e:
@@ -1569,12 +1615,13 @@ class TrayMonitor:
             msg += f"\n📶 WiFi {pct:.0f}% ({dbm} dBm, {_wifi_quality_label(pct)})"
         else:
             msg += "\n📶 WiFi N/A"
-        mpi, _ = get_memory_pressure()
+        mpi, mem_stats = get_memory_pressure()
         if mpi is not None:
             msg += f"\n🧠 MPI {mpi:.1f}% ({_mpi_label(mpi)})"
+            msg += _mpi_substats_block(mem_stats)
         if psutil:
             cpu = psutil.cpu_percent(interval=1)
-            msg += f"\n🖥️ CPU {cpu:.1f}%"
+            msg += f"\n[CPU] {cpu:.1f}%"
         disk_lines = self._disk_summary_lines()
         if disk_lines:
             msg += "\n" + "\n".join(disk_lines)
@@ -1602,9 +1649,11 @@ class TrayMonitor:
         try:
             from plyer import notification
             ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+            # Windows balloon tips are limited to 256 characters
+            balloon_message = message if len(message) <= 256 else message[:253] + "…"
             notification.notify(
                 title=f"Laptop Monitor v{__version__}",
-                message=message,
+                message=balloon_message,
                 app_icon=ico_path if os.path.isfile(ico_path) else None,
                 timeout=5,
             )
@@ -1642,24 +1691,25 @@ if __name__ == '__main__':
         threshold = int(cfg.get('threshold', 20))
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if info:
-            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
+            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 Started\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             if info.get('time_left'):
                 startup_msg += f"\n⏱️ ~{info['time_left']} remaining"
             _w_dbm, _w_pct = _get_wifi_dbm()
             if _w_pct is not None:
                 startup_msg += f"\n📶 WiFi {_w_pct:.0f}% ({_w_dbm} dBm, {_wifi_quality_label(_w_pct)})"
-            _mpi, _ = get_memory_pressure()
+            _mpi, _mpi_stats = get_memory_pressure()
             if _mpi is not None:
                 startup_msg += f"\n🧠 MPI {_mpi:.1f}% ({_mpi_label(_mpi)})"
+                startup_msg += _mpi_substats_block(_mpi_stats)
         else:
-            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 {now_str}"
+            startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 Started"
         disk_lines = monitor._disk_summary_lines()
         if disk_lines:
             startup_msg += "\n" + "\n".join(disk_lines)
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         today_str = datetime.date.today().strftime('%Y-%m-%d')
         def _send_startup():
-            send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'))
+            send_telegram_async(startup_msg, conf=cfg.get('telegram_conf'), parse_mode="Markdown")
             monitor._generate_and_send_graph(yesterday)
             monitor._generate_and_send_graph(today_str)
         threading.Thread(target=_send_startup, daemon=True).start()
