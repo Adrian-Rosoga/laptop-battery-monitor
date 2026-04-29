@@ -12,9 +12,29 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **Battery-recovered notification** — sent when the laptop is plugged back in or battery rises above threshold
 - **Daily disk space check** — checks all local drives at a configurable time and alerts if any drive exceeds a usage threshold
 - **Daily battery & CPU graph** — interactive window (opens maximised) with zoom/pan and cursor readout; Today and Yesterday graphs accessible from tray menu; also sent automatically via Telegram at midnight and on startup
-- **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), charging state every N seconds; auto-rotated after a configurable retention period
+- **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), Memory Pressure Index (MPI), charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
-- **Resilient Telegram delivery** — automatic retry with exponential backoff (5 s → 15 s → 45 s) on transient network errors (DNS failures, timeouts)
+- **Memory Pressure Index (MPI)** — composite 0–100% score logged and plotted on the graph; tracks when the system struggles with memory (see interpretation table below)
+
+### Memory Pressure Index (MPI)
+
+A composite 0–100% score derived from Windows `GetPerformanceInfo` (same source as Task Manager). Higher = more memory pressure.
+
+| MPI | Meaning |
+|-----|---------|
+| 0–30 | Normal — system comfortable |
+| 30–60 | Moderate — noticeable on heavy workloads |
+| 60–80 | High — slowdowns, active paging likely |
+| 80–100 | Critical — system is struggling |
+
+The MPI is a weighted combination of four factors:
+
+| Factor | Weight | What it measures |
+|--------|--------|------------------|
+| Available memory | 40% | Low available RAM is the most direct signal of impending hard paging |
+| Commit ratio | 30% | Virtual memory promised to processes vs. commit limit (RAM + page file) |
+| Cache depletion | 15% | Healthy systems keep ~25% RAM as file cache; cache collapse drives disk I/O |
+| Non-Paged Pool | 15% | Kernel memory that cannot be evicted; abnormal growth crowds out user space |
 - **Custom window icon** — graph window uses `laptop_battery_monitor.ico` instead of the default Tk feather
 
 | dBm | Quality |
@@ -159,7 +179,7 @@ Copy-Item dist\laptop_battery_monitor.exe MyDist\
 **Startup:**
 ```
 [GramAdi]
-▶️ Battery Monitor v2.0.
+▶️ Battery Monitor v2.1.
 
 Battery 40% (Alert at 30%) - Charging
 C: at 89.7% - 95.8 GB free of 929 GB

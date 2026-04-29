@@ -70,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "2.0"
+__version__ = "2.1"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
@@ -168,6 +168,80 @@ def _get_wifi_dbm():
             wlan.WlanCloseHandle(handle, None)
     except Exception:
         return None, None
+
+
+def get_memory_pressure():
+    """Return (mpi_pct, stats_dict) using Windows GetPerformanceInfo (same source as Task Manager).
+
+    MPI (Memory Pressure Index) is a composite 0–100 score:
+        0–30   Normal — system comfortable
+        30–60  Moderate — noticeable on heavy workloads
+        60–80  High — slowdowns, active paging likely
+        80–100 Critical — system is struggling
+
+    Weights:
+        40% Available memory ratio  — direct signal of impending hard paging
+        30% Commit ratio            — virtual memory promised vs total commit limit
+        15% Cache depletion         — healthy systems keep ~25% RAM as file cache
+        15% Non-Paged Pool pressure — kernel memory that cannot be evicted
+    """
+    try:
+        import ctypes
+        import ctypes.wintypes as _wt2
+
+        class _PERFORMANCE_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ('cb',                _wt2.DWORD),
+                ('CommitTotal',       ctypes.c_size_t),
+                ('CommitLimit',       ctypes.c_size_t),
+                ('CommitPeak',        ctypes.c_size_t),
+                ('PhysicalTotal',     ctypes.c_size_t),
+                ('PhysicalAvailable', ctypes.c_size_t),
+                ('SystemCache',       ctypes.c_size_t),
+                ('KernelTotal',       ctypes.c_size_t),
+                ('KernelPaged',       ctypes.c_size_t),
+                ('KernelNonpaged',    ctypes.c_size_t),
+                ('PageSize',          ctypes.c_size_t),
+                ('HandleCount',       _wt2.DWORD),
+                ('ProcessCount',      _wt2.DWORD),
+                ('ThreadCount',       _wt2.DWORD),
+            ]
+
+        pi = _PERFORMANCE_INFORMATION()
+        pi.cb = ctypes.sizeof(pi)
+        ctypes.windll.psapi.GetPerformanceInfo(ctypes.byref(pi), pi.cb)
+
+        page      = pi.PageSize
+        total     = pi.PhysicalTotal     * page
+        available = pi.PhysicalAvailable * page
+        committed = pi.CommitTotal       * page
+        limit     = pi.CommitLimit       * page
+        cached    = pi.SystemCache       * page
+        np_pool   = pi.KernelNonpaged    * page
+
+        if total == 0 or limit == 0:
+            return None, {}
+
+        avail_score  = 1.0 - (available / total)
+        commit_score = min(1.0, committed / limit)
+        cache_score  = max(0.0, 1.0 - (cached / (0.25 * total)))
+        nppool_score = min(1.0, np_pool / (0.03 * total))
+
+        mpi = (0.40 * avail_score +
+               0.30 * commit_score +
+               0.15 * cache_score +
+               0.15 * nppool_score) * 100
+
+        return round(mpi, 1), {
+            'total_gb':         round(total     / 2**30, 2),
+            'available_gb':     round(available / 2**30, 2),
+            'committed_gb':     round(committed / 2**30, 2),
+            'cached_gb':        round(cached    / 2**30, 2),
+            'nonpaged_pool_mb': round(np_pool   / 2**20, 1),
+        }
+    except Exception as e:
+        logging.debug(f"get_memory_pressure failed: {e}")
+        return None, {}
 
 
 def _wifi_text_color(dbm):
@@ -497,6 +571,7 @@ class TrayMonitor:
         self._disk_alert_sent_date = None
         self._wifi_dbm  = None          # last known WiFi dBm; None = no WiFi / not yet read
         self._wifi_pct  = None          # last known WiFi quality %; None = no WiFi / not yet read
+        self._mem_pressure = None       # last known Memory Pressure Index (0-100)
         self._open_windows = []  # track open tkinter windows for clean exit
 
         self.icon = None
@@ -628,7 +703,7 @@ class TrayMonitor:
                 return
 
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-            fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi = result
+            fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem = result
             win = tk.Tk()
             self._open_windows.append(win)
             win.title(f"Monitor \u2014 {date_str}")
@@ -672,7 +747,7 @@ class TrayMonitor:
                     return
                 # Cursor outside the data range entirely → no data
                 if t < plot_times[0] or t > plot_times[-1]:
-                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A")
+                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A    MPI: N/A")
                     return
                 # Binary search for the two plot points that bracket the cursor time.
                 # plot_times includes NaN sentinel datetimes at gap midpoints, so the
@@ -685,16 +760,17 @@ class TrayMonitor:
                 in_gap = (isinstance(bat_l, float) and math.isnan(bat_l)) or \
                          (isinstance(bat_r, float) and math.isnan(bat_r))
                 if in_gap:
-                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A")
+                    status_var.set(f"  Time: {t.strftime('%H:%M:%S')}    Battery: N/A    CPU: N/A    WiFi: N/A    MPI: N/A")
                 else:
                     # Snap to whichever bracketing point is closer
                     if abs((plot_times[i] - t).total_seconds()) <= abs((plot_times[i + 1] - t).total_seconds()):
-                        pt, bat, cpu, wif = plot_times[i], bat_l, plot_cpu[i], plot_wifi[i]
+                        pt, bat, cpu, wif, mem = plot_times[i], bat_l, plot_cpu[i], plot_wifi[i], plot_mem[i]
                     else:
-                        pt, bat, cpu, wif = plot_times[i + 1], bat_r, plot_cpu[i + 1], plot_wifi[i + 1]
+                        pt, bat, cpu, wif, mem = plot_times[i + 1], bat_r, plot_cpu[i + 1], plot_wifi[i + 1], plot_mem[i + 1]
                     wifi_str = f"{wif:.0f}%" if (wif is not None and not math.isnan(wif)) else "N/A"
+                    mem_str  = f"{mem:.1f}%" if (mem is not None and not math.isnan(mem))  else "N/A"
                     status_var.set(
-                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}"
+                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}    MPI: {mem_str}"
                     )
 
             canvas.mpl_connect('motion_notify_event', on_motion)
@@ -764,7 +840,7 @@ class TrayMonitor:
             #    finalizes Variable.__del__ immediately on this thread.
             try:
                 del status_bar, status_var, toolbar, canvas, fig, ax
-                del plot_times, plot_battery, plot_cpu, plot_wifi
+                del plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem
             except Exception:
                 pass
 
@@ -938,7 +1014,7 @@ class TrayMonitor:
             logging.error(f"Failed to rotate logs: {e}")
 
     def _write_csv_row(self, timestamp, battery_percent, cpu_percent, charging,
-                        wifi_dbm=None, wifi_pct=None):
+                        wifi_dbm=None, wifi_pct=None, mem_pressure=None):
         """Append a data row to today's dated CSV file, writing the header on first creation."""
         date_str = timestamp[:10]  # 'YYYY-MM-DD'
         csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
@@ -948,15 +1024,16 @@ class TrayMonitor:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow(['timestamp', 'battery_percent', 'cpu_percent', 'charging',
-                                     'wifi_dbm', 'wifi_pct'])
+                                     'wifi_dbm', 'wifi_pct', 'mem_pressure'])
                 writer.writerow([timestamp, battery_percent, cpu_percent, charging,
                                  wifi_dbm if wifi_dbm is not None else '',
-                                 wifi_pct if wifi_pct is not None else ''])
+                                 wifi_pct if wifi_pct is not None else '',
+                                 mem_pressure if mem_pressure is not None else ''])
         except Exception as e:
             logging.error(f"Failed to write CSV log: {e}")
 
     def _build_graph_figure(self, date_str):
-        """Load CSV data and build a matplotlib figure. Returns (fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi) or None."""
+        """Load CSV data and build a matplotlib figure. Returns (fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem) or None."""
         if plt is None:
             logging.warning("matplotlib not available; skipping graph generation")
             return None
@@ -989,16 +1066,19 @@ class TrayMonitor:
                     return math.nan
             wifi_pct_raw = [_safe_float(r.get('wifi_pct', '')) for r in rows]
             has_wifi = any(not math.isnan(v) for v in wifi_pct_raw)
+            mem_pressure_raw = [_safe_float(r.get('mem_pressure', '')) for r in rows]
+            has_mem = any(not math.isnan(v) for v in mem_pressure_raw)
 
             # Insert NaN breaks where the gap between consecutive points exceeds
             # 2× the data_log_interval (computer was likely asleep or stopped).
             gap_threshold_s = int(self.config.get('data_log_interval', 60)) * 2
-            plot_times, plot_battery, plot_cpu, plot_wifi = [], [], [], []
+            plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem = [], [], [], [], []
             for i in range(len(times)):
                 plot_times.append(times[i])
                 plot_battery.append(battery[i])
                 plot_cpu.append(cpu[i])
                 plot_wifi.append(wifi_pct_raw[i])
+                plot_mem.append(mem_pressure_raw[i])
                 if i + 1 < len(times):
                     gap = (times[i + 1] - times[i]).total_seconds()
                     if gap > gap_threshold_s:
@@ -1006,6 +1086,7 @@ class TrayMonitor:
                         plot_battery.append(math.nan)
                         plot_cpu.append(math.nan)
                         plot_wifi.append(math.nan)
+                        plot_mem.append(math.nan)
 
             fig = matplotlib.figure.Figure(figsize=(14, 7.5))
             ax = fig.add_subplot(1, 1, 1)
@@ -1029,6 +1110,12 @@ class TrayMonitor:
             if has_wifi:
                 ax.plot(plot_times, plot_wifi, label='WiFi %', color='mediumorchid',
                         linewidth=1.5, alpha=0.85, linestyle='--')
+            if has_mem:
+                ax.plot(plot_times, plot_mem, label='MPI %', color='darkorange',
+                        linewidth=1.5, alpha=0.85, linestyle=':')
+            if has_mem:
+                ax.plot(plot_times, plot_mem, label='MPI %', color='darkorange',
+                        linewidth=1.5, alpha=0.85, linestyle=':')
             ax.set_ylim(0, 105)
             ax.set_ylabel('Percent (%)')
             ax.set_xlabel('Time')
@@ -1043,6 +1130,16 @@ class TrayMonitor:
                     plt.Line2D([0], [0], color='mediumorchid', linewidth=1.5,
                                linestyle='--', label='WiFi %')
                 )
+            if has_mem:
+                legend_elements.append(
+                    plt.Line2D([0], [0], color='darkorange', linewidth=1.5,
+                               linestyle=':', label='MPI %')
+                )
+            if has_mem:
+                legend_elements.append(
+                    plt.Line2D([0], [0], color='darkorange', linewidth=1.5,
+                               linestyle=':', label='MPI %')
+                )
             legend_elements += [
                 Patch(facecolor='#fffde7', edgecolor='gray', alpha=0.9, label='Discharging'),
                 Patch(facecolor='green', alpha=0.35, label='Charging'),
@@ -1050,13 +1147,13 @@ class TrayMonitor:
             ax.legend(handles=legend_elements, loc='upper center',
                       bbox_to_anchor=(0.5, -0.18), ncol=len(legend_elements),
                       frameon=True, fontsize=9)
-            ax.set_title(f'Battery, CPU, Wifi — {date_str} — {HOSTNAME}')
+            ax.set_title(f'Battery, CPU, WiFi, MPI — {date_str} — {HOSTNAME}')
             if times[0] != times[-1]:
                 ax.set_xlim(times[0], times[-1])
             ax.grid(True, axis='y', alpha=0.3)
             ax.grid(True, axis='x', alpha=0.07)
             fig.tight_layout(rect=[0, 0.08, 1, 1])
-            return fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi
+            return fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem
         except Exception as e:
             logging.error(f"Failed to build graph figure for {date_str}: {e}")
             return None
@@ -1066,7 +1163,7 @@ class TrayMonitor:
         result = self._build_graph_figure(date_str)
         if result is None:
             return None
-        fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi = result
+        fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem = result
         try:
             graph_path = os.path.join(ROOT_DIR, f'battery_log_{date_str}.png')
             fig.savefig(graph_path, dpi=100)
@@ -1188,9 +1285,12 @@ class TrayMonitor:
                     # interval=None on subsequent calls uses the delta from the previous call.
                     cpu_interval = 1 if self._last_csv_time is None else None
                     cpu_percent = psutil.cpu_percent(interval=cpu_interval) if psutil else 0.0
+                    mpi, _ = get_memory_pressure()
+                    self._mem_pressure = mpi
                     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     self._write_csv_row(timestamp, percent, cpu_percent, plugged,
-                                         wifi_dbm=self._wifi_dbm, wifi_pct=self._wifi_pct)
+                                         wifi_dbm=self._wifi_dbm, wifi_pct=self._wifi_pct,
+                                         mem_pressure=self._mem_pressure)
                     self._last_csv_time = now
 
                 # Update battery icon
