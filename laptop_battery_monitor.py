@@ -820,6 +820,16 @@ class TrayMonitor:
                         pt, bat, cpu, wif, mem = plot_times[i + 1], bat_r, plot_cpu[i + 1], plot_wifi[i + 1], plot_mem[i + 1]
                     wifi_str = f"{wif:.0f}%" if (wif is not None and not math.isnan(wif)) else "N/A"
                     mem_str  = f"{mem:.1f}%" if (mem is not None and not math.isnan(mem))  else "N/A"
+                    if wif is not None and not math.isnan(wif):
+                        if wif >= 90:   wifi_str += " (Excellent)"
+                        elif wif >= 75: wifi_str += " (Good)"
+                        elif wif >= 50: wifi_str += " (Fair)"
+                        else:           wifi_str += " (Poor)"
+                    if mem is not None and not math.isnan(mem):
+                        if mem < 30:    mem_str += " (Normal)"
+                        elif mem < 60:  mem_str += " (Moderate)"
+                        elif mem < 80:  mem_str += " (High)"
+                        else:           mem_str += " (Critical)"
                     status_var.set(
                         f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}    MPI: {mem_str}"
                     )
