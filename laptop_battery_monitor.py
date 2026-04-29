@@ -70,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "2.1"
+__version__ = "2.2"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
@@ -439,6 +439,50 @@ def _resolve_telegram_conf(conf=None):
     return None
 
 
+def _parse_telegram_conf(conf_path=None):
+    """Parse a telegram-send INI file and return (token, chat_id) or (None, None) on any error."""
+    import configparser
+    path = conf_path or _resolve_telegram_conf()
+    if not path or not os.path.isfile(path):
+        return None, None
+    try:
+        cp = configparser.ConfigParser()
+        cp.read(path, encoding='utf-8')
+        token   = cp.get('telegram', 'token',   fallback=None)
+        chat_id = cp.get('telegram', 'chat_id', fallback=None)
+        if token and chat_id:
+            return token.strip(), chat_id.strip()
+    except Exception as e:
+        logging.warning(f"_parse_telegram_conf: {e}")
+    return None, None
+
+
+def _fetch_telegram_updates(token, offset, timeout=25):
+    """Long-poll the Telegram Bot API for new messages.
+    Returns (list_of_updates, new_offset). Uses only stdlib urllib."""
+    import urllib.request
+    import json
+    import urllib.parse
+    url = (
+        f"https://api.telegram.org/bot{token}/getUpdates"
+        f"?offset={offset}&timeout={timeout}"
+        f"&allowed_updates=%5B%22message%22%5D"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=timeout + 5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        if not data.get('ok'):
+            return [], offset
+        updates = data.get('result', [])
+        new_offset = offset
+        for u in updates:
+            new_offset = max(new_offset, u['update_id'] + 1)
+        return updates, new_offset
+    except Exception as e:
+        logging.debug(f"_fetch_telegram_updates: {e}")
+        return [], offset
+
+
 def send_telegram_async(message, conf=None, retries=3, retry_base_delay=5):
     """Send a Telegram message with automatic retry and exponential backoff on transient network errors."""
     import asyncio
@@ -573,6 +617,9 @@ class TrayMonitor:
         self._wifi_pct  = None          # last known WiFi quality %; None = no WiFi / not yet read
         self._mem_pressure = None       # last known Memory Pressure Index (0-100)
         self._open_windows = []  # track open tkinter windows for clean exit
+        self._poll_thread = None        # Telegram incoming-message polling thread
+        self._info_cmd_lock = threading.Lock()
+        self._last_info_cmd_time = None
 
         self.icon = None
         self.wifi_icon = None
@@ -608,6 +655,10 @@ class TrayMonitor:
         self._notify(f"[{HOSTNAME}] ▶️ Battery monitoring started")
         # Rotate old CSV logs on startup
         threading.Thread(target=self._rotate_csv_logs, daemon=True).start()
+        # Start Telegram incoming-message polling (if Telegram is enabled)
+        if self.config.get('telegram_enabled'):
+            self._poll_thread = threading.Thread(target=self._telegram_poll_loop, daemon=True)
+            self._poll_thread.start()
 
     def stop_monitoring(self, icon=None, item=None):
         if not self._running:
@@ -1385,6 +1436,84 @@ class TrayMonitor:
         except Exception as e:
             logging.error(f"Failed to get disk summary: {e}")
         return lines
+
+    def _telegram_poll_loop(self):
+        """Daemon thread: long-polls Telegram getUpdates and dispatches info commands."""
+        conf_path = _resolve_telegram_conf(self.config.get('telegram_conf'))
+        token, auth_chat_id = _parse_telegram_conf(conf_path)
+        if not token or not auth_chat_id:
+            logging.warning("_telegram_poll_loop: no token/chat_id found — polling disabled")
+            return
+        logging.info(f"Telegram poll loop started (chat_id={auth_chat_id})")
+        offset = 0
+        while not self._stop_event.is_set():
+            try:
+                updates, offset = _fetch_telegram_updates(token, offset, timeout=25)
+                for update in updates:
+                    msg = update.get('message') or update.get('edited_message')
+                    if not msg:
+                        continue
+                    chat_id = str(msg.get('chat', {}).get('id', ''))
+                    if chat_id != auth_chat_id:
+                        logging.debug(f"Telegram poll: ignored message from chat_id={chat_id}")
+                        continue
+                    text = (msg.get('text') or '').strip().lower()
+                    if text == f"info {HOSTNAME.lower()}":
+                        logging.info("Telegram poll: received info command")
+                        threading.Thread(target=self._handle_info_command, daemon=True).start()
+            except Exception as e:
+                logging.warning(f"_telegram_poll_loop error: {e}")
+                # Back off 30 s before retrying on unexpected errors
+                for _ in range(30):
+                    if self._stop_event.is_set():
+                        return
+                    time.sleep(1)
+        logging.info("Telegram poll loop stopped")
+
+    def _build_info_message(self):
+        """Build a fresh stats message with live readings of battery, WiFi, MPI, CPU and disk."""
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        msg = f"ℹ️ Info — {now_str}\n"
+        info = self._get_battery_info()
+        if info:
+            threshold = int(self.config.get('threshold', 20))
+            msg += f"\n🔋 Battery {info['percent']}% (Alert at {threshold}%)"
+            msg += f"\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
+            if info.get('time_left'):
+                msg += f"\n⏱️ ~{info['time_left']} remaining"
+        dbm, pct = _get_wifi_dbm()
+        if pct is not None:
+            msg += f"\n📶 WiFi {pct:.0f}% ({dbm} dBm)"
+        else:
+            msg += "\n📶 WiFi N/A"
+        mpi, _ = get_memory_pressure()
+        if mpi is not None:
+            msg += f"\n🧠 MPI {mpi:.1f}%"
+        if psutil:
+            cpu = psutil.cpu_percent(interval=1)
+            msg += f"\n🖥️ CPU {cpu:.1f}%"
+        disk_lines = self._disk_summary_lines()
+        if disk_lines:
+            msg += "\n" + "\n".join(disk_lines)
+        return msg
+
+    def _handle_info_command(self):
+        """Respond to an 'info <hostname>' Telegram command: send stats then today/yesterday graphs."""
+        now = time.time()
+        with self._info_cmd_lock:
+            if (self._last_info_cmd_time is not None) and (now - self._last_info_cmd_time < 15):
+                logging.debug("info command ignored — within 15 s cooldown")
+                return
+            self._last_info_cmd_time = now
+        try:
+            conf = self.config.get('telegram_conf')
+            send_telegram_async(self._build_info_message(), conf=conf)
+            yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+            today_str = datetime.date.today().strftime('%Y-%m-%d')
+            self._generate_and_send_graph(yesterday)
+            self._generate_and_send_graph(today_str)
+        except Exception as e:
+            logging.error(f"_handle_info_command error: {e}")
 
     def _notify(self, message):
         try:

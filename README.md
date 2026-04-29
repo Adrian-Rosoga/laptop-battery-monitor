@@ -15,6 +15,7 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **CSV data logging** — records battery %, CPU %, WiFi signal (dBm & %), Memory Pressure Index (MPI), charging state every N seconds; auto-rotated after a configurable retention period
 - **Settings UI** — all thresholds, intervals and Telegram config editable at runtime without restarting
 - **Memory Pressure Index (MPI)** — composite 0–100% score logged and plotted on the graph; tracks when the system struggles with memory (see interpretation table below)
+- **Telegram remote query** — send `info <hostname>` from Telegram desktop to get a live stats snapshot + today's and yesterday's graphs on demand (see section below)
 
 ### Memory Pressure Index (MPI)
 
@@ -36,6 +37,30 @@ The MPI is a weighted combination of four factors:
 | Cache depletion | 15% | Healthy systems keep ~25% RAM as file cache; cache collapse drives disk I/O |
 | Non-Paged Pool | 15% | Kernel memory that cannot be evicted; abnormal growth crowds out user space |
 - **Custom window icon** — graph window uses `laptop_battery_monitor.ico` instead of the default Tk feather
+
+---
+
+### Telegram Remote Query
+
+While the monitor is running, send the following message from your Telegram account to the bot:
+
+```
+info GramAdi
+```
+
+Replace `GramAdi` with the exact hostname of your machine (case-insensitive). The monitor will respond with:
+
+| Response | Content |
+|----------|---------|
+| Stats message | Battery %, charge state, time remaining, WiFi signal, MPI, CPU %, disk usage for all drives |
+| Yesterday's graph | Daily battery/CPU/WiFi/MPI chart as an image |
+| Today's graph | Same for the current day |
+
+**Security**: the bot only responds to the `chat_id` configured in `telegram-send.conf`. Messages from any other chat are silently ignored.
+
+A 15-second cooldown prevents duplicate responses if the command is sent rapidly.
+
+
 
 | dBm | Quality |
 |-----|---------|
