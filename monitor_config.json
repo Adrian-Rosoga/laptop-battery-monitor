@@ -1,14 +1,15 @@
 {
-  "threshold": 30,
-  "interval": 1,
+  "battery_threshold_percentage": 30,
+  "check_interval_seconds": 1,
   "telegram_enabled": true,
   "telegram_conf": "C:\\Bin\\Run\\telegram-send.conf",
   "logging_enabled": true,
-  "data_log_interval": 60,
+  "data_log_interval_seconds": 60,
   "data_log_retention_days": 30,
   "disk_alert_enabled": true,
-  "disk_alert_threshold": 90,
+  "disk_alert_threshold_percentage": 90,
   "disk_alert_time": "06:00",
   "resend_minutes": 5,
+  "mpi_threshold_percentage": 90,
   "start_minimized": false
 }

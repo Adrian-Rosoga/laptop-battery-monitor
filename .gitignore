@@ -28,3 +28,4 @@ telegram-send.conf
 battery_log_*.csv
 battery_log_*.png
 !docs/
+logs/

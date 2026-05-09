@@ -1,3 +1,5 @@
+PS C:\Users\Adi\OneDrive\Desktop\# PROJECTS\Laptop Battery Monitor> (Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned) ; (& "c:\Users\Adi\OneDrive\Desktop\# PROJECTS\Laptop Battery Monitor\.venv\Scripts\Activate.ps1")
+
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 
@@ -38,6 +40,10 @@ DONE - Embed the version in the executable to be able to track what runs
 - Fix icon of graph window
 - Change name from Laptop Battery Monitor to Laptop Monitor or Monitor
 - Moni/Rares/etc sa instaleze pe laptop
+- https://centylab.com/ - PocketPD - programmable power supply and PPSTrigger V2.2 - Current Limit USB PD/PPS trigger (https://www.elecrow.com/ppstrigger-v2-2-current-limit-usb-pd-pps-trigger.html)
+- Remove "Remaining" as it is wrong and not that useful anyway
+- Add breakdown of MPI
+- Make Graph window title bigger
 
 === INFO
 

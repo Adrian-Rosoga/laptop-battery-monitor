@@ -70,7 +70,7 @@ except Exception as e:
     logging.warning(f"matplotlib not available: {e}")
     plt = None
 
-__version__ = "2.4"
+__version__ = "2.5"
 HOSTNAME = socket.gethostname()
 ALERT_BORDER = "🚨" * 3
 #LOG_LEVEL = logging.DEBUG
@@ -86,7 +86,9 @@ else:
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_PATH = os.path.join(ROOT_DIR, "monitor_config.json")
-CSV_LOG_DIR = ROOT_DIR   # daily CSV files are written here
+LOGS_DIR = os.path.join(ROOT_DIR, 'logs')   # all CSV, log and PNG files go here
+os.makedirs(LOGS_DIR, exist_ok=True)
+CSV_LOG_DIR = LOGS_DIR
 
 
 def _get_wifi_dbm():
@@ -342,16 +344,17 @@ def make_wifi_icon_image(size=128, dbm=None):
 
 
 DEFAULT_CONFIG = {
-    "threshold": 20,
-    "interval": 1,
+    "battery_threshold_percentage": 20,
+    "check_interval_seconds": 1,
     "telegram_enabled": False,
     "telegram_conf": None,
     "logging_enabled": False,
-    "data_log_interval": 60,
+    "data_log_interval_seconds": 60,
     "data_log_retention_days": 30,
     "disk_alert_enabled": True,
-    "disk_alert_threshold": 90,
+    "disk_alert_threshold_percentage": 90,
     "disk_alert_time": "07:00",
+    "mpi_threshold_percentage": 90,
 }
 DEFAULT_CONFIG["resend_minutes"] = 5
 
@@ -402,7 +405,7 @@ def setup_logging(enabled, date_str=None):
         if date_str is None:
             date_str = datetime.date.today().strftime('%Y-%m-%d')
         log_filename = f'battery_monitor_{date_str}.log'
-        handlers = [logging.FileHandler(os.path.join(ROOT_DIR, log_filename))]
+        handlers = [logging.FileHandler(os.path.join(LOGS_DIR, log_filename))]
         if sys.stdout is not None:
             try:
                 handlers.append(_SafeStreamHandler(sys.stdout))
@@ -555,11 +558,11 @@ class SettingsWindow:
                 pass
 
         tk.Label(self.root, text="Low battery threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
-        self.threshold_var = tk.StringVar(value=str(self.config.get('threshold', 20)))
+        self.threshold_var = tk.StringVar(value=str(self.config.get('battery_threshold_percentage', 20)))
         tk.Entry(self.root, textvariable=self.threshold_var).pack(fill='x', padx=8)
 
         tk.Label(self.root, text="Check interval (seconds)").pack(anchor='w', padx=8, pady=(8, 0))
-        self.interval_var = tk.StringVar(value=str(self.config.get('interval', 1)))
+        self.interval_var = tk.StringVar(value=str(self.config.get('check_interval_seconds', 1)))
         tk.Entry(self.root, textvariable=self.interval_var).pack(fill='x', padx=8)
 
         self.telegram_var = tk.BooleanVar(value=bool(self.config.get('telegram_enabled')))
@@ -574,7 +577,7 @@ class SettingsWindow:
         tk.Entry(self.root, textvariable=self.resend_var).pack(fill='x', padx=8)
 
         tk.Label(self.root, text="Data log interval (seconds)").pack(anchor='w', padx=8, pady=(8, 0))
-        self.data_log_interval_var = tk.StringVar(value=str(self.config.get('data_log_interval', 60)))
+        self.data_log_interval_var = tk.StringVar(value=str(self.config.get('data_log_interval_seconds', 60)))
         tk.Entry(self.root, textvariable=self.data_log_interval_var).pack(fill='x', padx=8)
 
         tk.Label(self.root, text="Data log retention (days)").pack(anchor='w', padx=8, pady=(8, 0))
@@ -584,13 +587,17 @@ class SettingsWindow:
         self.logging_var = tk.BooleanVar(value=bool(self.config.get('logging_enabled')))
         tk.Checkbutton(self.root, text="Enable logging", variable=self.logging_var).pack(anchor='w', padx=8, pady=(8, 0))
 
+        tk.Label(self.root, text="MPI alert threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
+        self.mpi_threshold_var = tk.StringVar(value=str(self.config.get('mpi_threshold_percentage', 90)))
+        tk.Entry(self.root, textvariable=self.mpi_threshold_var).pack(fill='x', padx=8)
+
         tk.Label(self.root, text="─" * 38).pack(anchor='w', padx=8, pady=(8, 0))
 
         self.disk_alert_var = tk.BooleanVar(value=bool(self.config.get('disk_alert_enabled', True)))
         tk.Checkbutton(self.root, text="Enable daily disk space alert", variable=self.disk_alert_var).pack(anchor='w', padx=8, pady=(4, 0))
 
         tk.Label(self.root, text="Disk usage alert threshold (%)").pack(anchor='w', padx=8, pady=(8, 0))
-        self.disk_threshold_var = tk.StringVar(value=str(self.config.get('disk_alert_threshold', 90)))
+        self.disk_threshold_var = tk.StringVar(value=str(self.config.get('disk_alert_threshold_percentage', 90)))
         tk.Entry(self.root, textvariable=self.disk_threshold_var).pack(fill='x', padx=8)
 
         tk.Label(self.root, text="Disk alert time (HH:MM, 24h)").pack(anchor='w', padx=8, pady=(8, 0))
@@ -605,17 +612,18 @@ class SettingsWindow:
 
     def save(self):
         try:
-            self.config['threshold'] = int(self.threshold_var.get())
-            self.config['interval'] = int(self.interval_var.get())
+            self.config['battery_threshold_percentage'] = int(self.threshold_var.get())
+            self.config['check_interval_seconds'] = int(self.interval_var.get())
             self.config['resend_minutes'] = int(self.resend_var.get())
-            self.config['data_log_interval'] = int(self.data_log_interval_var.get())
+            self.config['data_log_interval_seconds'] = int(self.data_log_interval_var.get())
             self.config['data_log_retention_days'] = int(self.data_log_retention_var.get())
             self.config['telegram_enabled'] = bool(self.telegram_var.get())
             self.config['logging_enabled'] = bool(self.logging_var.get())
             conf = self.telegram_conf_var.get().strip()
             self.config['telegram_conf'] = conf if conf else None
+            self.config['mpi_threshold_percentage'] = int(self.mpi_threshold_var.get())
             self.config['disk_alert_enabled'] = bool(self.disk_alert_var.get())
-            self.config['disk_alert_threshold'] = int(self.disk_threshold_var.get())
+            self.config['disk_alert_threshold_percentage'] = int(self.disk_threshold_var.get())
             self.config['disk_alert_time'] = self.disk_alert_time_var.get().strip()
             save_config(self.config)
             if self.on_save:
@@ -655,6 +663,8 @@ class TrayMonitor:
         self._wifi_pct  = None          # last known WiFi quality %; None = no WiFi / not yet read
         self._mem_pressure = None       # last known Memory Pressure Index (0-100)
         self._mem_stats = {}            # last known MPI sub-scores and raw memory stats
+        self._last_mpi_alert_time = None
+        self._was_mpi_high = False
         self._open_windows = []  # track open tkinter windows for clean exit
         self._poll_thread = None        # Telegram incoming-message polling thread
         self._info_cmd_lock = threading.Lock()
@@ -670,6 +680,7 @@ class TrayMonitor:
                 pystray.MenuItem('Show Graph - Today', lambda icon, item: self.show_graph(), default=True),
                 pystray.MenuItem('Show Graph - Yesterday', lambda icon, item: self.show_graph_yesterday()),
                 pystray.MenuItem('Settings', self.open_settings),
+                pystray.MenuItem('Help', self.show_help),
                 pystray.MenuItem('About', self.show_about),
                 pystray.MenuItem('Exit', self.exit)
             )
@@ -713,7 +724,7 @@ class TrayMonitor:
         info = self._get_battery_info() if psutil else None
         msg = f"{HOSTNAME}: {status}"
         if info:
-            threshold = int(self.config.get('threshold', 20))
+            threshold = int(self.config.get('battery_threshold_percentage', 20))
             msg += f"\n🔋 Battery {info['percent']}% (Alert at {threshold}%)"
             msg += f"\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             if info.get('time_left'):
@@ -819,6 +830,163 @@ class TrayMonitor:
         
         threading.Thread(target=_show_about, daemon=True).start()
 
+    def show_help(self, icon=None, item=None):
+        """Show Help dialog with program overview, WiFi dBm mapping, MPI breakdown, and tips."""
+        if tk is None:
+            self._notify("tkinter not available; cannot open Help dialog.")
+            return
+
+        def _show_help():
+            win = tk.Tk()
+            win.title("Help")
+            win.geometry("640x560")
+            win.resizable(True, True)
+            ico_path = os.path.join(ROOT_DIR, 'laptop_battery_monitor.ico')
+            if os.path.isfile(ico_path):
+                try:
+                    win.iconbitmap(ico_path)
+                except Exception:
+                    pass
+
+            frame = tk.Frame(win)
+            frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+            scrollbar = tk.Scrollbar(frame)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            text = tk.Text(
+                frame, wrap=tk.WORD, yscrollcommand=scrollbar.set,
+                font=("Consolas", 11), padx=8, pady=6, relief=tk.FLAT,
+                bg=win.cget('bg')
+            )
+            text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.config(command=text.yview)
+
+            # WiFi table — plain ASCII, f-string :<N padding guarantees alignment
+            _w1, _w2, _w3 = 14, 12, 13
+            _wifi_rows = [
+                ("dBm",        "Quality %",  "Label",     "Tray icon colour"),
+                ("-" * _w1,    "-" * _w2,    "-" * _w3,   "-" * 16),
+                (">= -55",     ">= 90 %",    "Excellent", "Green"),
+                ("-65 to -55", "70-90 %",    "Good",      "Yellow-green"),
+                ("-75 to -65", "50-70 %",    "Fair",      "Dark orange"),
+                ("< -75",      "< 50 %",     "Poor",      "Red"),
+                ("N/A",        "-",          "-",         "Grey"),
+            ]
+            wifi_table = "".join(
+                f"  {r[0]:<{_w1}}{r[1]:<{_w2}}{r[2]:<{_w3}}{r[3]}\n"
+                for r in _wifi_rows
+            )
+
+            # MPI bands table
+            _m1, _m2 = 13, 12
+            _mpi_rows = [
+                ("MPI Range",  "Label",     "Meaning"),
+                ("-" * _m1,    "-" * _m2,   "-" * 32),
+                ("0 - 30",     "Normal",    "System is comfortable"),
+                ("30 - 60",    "Moderate",  "Noticeable on heavy workloads"),
+                ("60 - 80",    "High",      "Slowdowns; active paging likely"),
+                ("80 - 100",   "Critical",  "System is struggling"),
+            ]
+            mpi_bands_table = "".join(
+                f"  {r[0]:<{_m1}}{r[1]:<{_m2}}{r[2]}\n"
+                for r in _mpi_rows
+            )
+
+            # MPI breakdown table
+            _b1, _b2 = 19, 8
+            _breakdown_rows = [
+                ("Component",        "Weight", "Measures"),
+                ("-" * _b1,          "-" * _b2, "-" * 38),
+                ("RAM Used",         "40 %",   "Physical memory consumed"),
+                ("Commit Ratio",     "30 %",   "Virtual memory promised vs commit limit"),
+                ("Cache Depletion",  "15 %",   "File cache below 25 % of RAM"),
+                ("NP Pool Pressure", "15 %",   "Non-paged kernel pool vs 3 % of RAM"),
+            ]
+            breakdown_table = "".join(
+                f"  {r[0]:<{_b1}}{r[1]:<{_b2}}{r[2]}\n"
+                for r in _breakdown_rows
+            )
+
+            help_text = (
+                f"LAPTOP BATTERY MONITOR v{__version__} \u2014 Help\n"
+                + "\u2550" * 50 + "\n\n"
+
+                "OVERVIEW\n"
+                + "\u2500" * 30 + "\n"
+                "Runs silently in the system tray and monitors battery charge,\n"
+                "WiFi signal strength, memory pressure (MPI) and CPU usage.\n"
+                "Sends Telegram alerts when battery is low, charging is needed,\n"
+                "or disk usage exceeds a threshold. Readings are logged to daily\n"
+                "CSV files; graphs can be viewed on demand from the tray menu.\n\n"
+
+                "WIFI SIGNAL STRENGTH (dBm)\n"
+                + "\u2500" * 30 + "\n"
+                "dBm is a logarithmic unit of signal power relative to 1 mW.\n"
+                "Values are always negative \u2014 closer to 0 means stronger signal.\n\n"
+                "  Conversion formula:\n"
+                "  Quality % = min(100, max(0, 2 x (dBm + 100)))\n\n"
+                + wifi_table + "\n"
+
+                "MPI \u2014 MEMORY PRESSURE INDEX\n"
+                + "\u2500" * 30 + "\n"
+                "Composite 0-100 score reflecting how hard Windows is working\n"
+                "to meet memory demands. A rising MPI precedes sluggishness\n"
+                "and disk paging activity.\n\n"
+                + mpi_bands_table + "\n"
+
+                "MPI BREAKDOWN\n"
+                + "\u2500" * 30 + "\n"
+                "MPI is computed as a weighted sum of four sub-scores (each 0-100 %).\n\n"
+                + breakdown_table
+                + "\n  Tip: RAM Used and Commit Ratio dominate. Close large apps\n"
+                "  or reboot to reset commit charge when MPI is Moderate/High.\n\n"
+
+                "TELEGRAM REMOTE QUERY\n"
+                + "\u2500" * 30 + "\n"
+                "When Telegram is enabled, you can request a live status\n"
+                "report remotely by sending this message to your bot:\n\n"
+                f"  info {HOSTNAME}\n\n"
+                "The monitor replies with live stats (battery, WiFi, MPI,\n"
+                "CPU, disk) and then sends today's and yesterday's graphs.\n"
+                "Only the chat_id in telegram-send.conf can trigger a\n"
+                "response (security gate).\n\n"
+
+                "TRAY ICONS\n"
+                + "\u2500" * 30 + "\n"
+                "  Battery icon\n"
+                "    Green background  \u2014 charging\n"
+                "    Yellow background \u2014 discharging\n"
+                "    Red number        \u2014 current battery %\n"
+                "  WiFi icon\n"
+                "    Light-grey square always\n"
+                "    Coloured number   \u2014 current dBm (colour reflects quality)\n\n"
+
+                "CONFIG & LOGS\n"
+                + "\u2500" * 30 + "\n"
+                + f"  Settings file : monitor_config.json\n"
+                f"  Location      : {ROOT_DIR}\n"
+                f"  Logs folder   : {LOGS_DIR}\n"
+                "  CSV logs      : battery_log_YYYY-MM-DD.csv (logs folder)\n"
+                "  Log retention : configurable in Settings (default 30 days)\n"
+                "  Telegram conf : telegram-send.conf\n"
+            )
+
+            text.insert(tk.END, help_text)
+            text.config(state=tk.DISABLED)
+
+            close_btn = tk.Button(win, text="Close", command=win.quit)
+            close_btn.pack(pady=6)
+            win.protocol("WM_DELETE_WINDOW", win.quit)
+
+            win.mainloop()
+
+            import gc
+            gc.collect()
+            win.destroy()
+
+        threading.Thread(target=_show_help, daemon=True).start()
+
     def show_graph(self, icon=None, item=None, date_str=None):
         """Show the battery graph for the given date (default: today) in an interactive popup."""
         if tk is None:
@@ -840,7 +1008,7 @@ class TrayMonitor:
                 return
 
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-            fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem = result
+            fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem, plot_ram, plot_commit, plot_cache, plot_np = result
             win = tk.Tk()
             self._open_windows.append(win)
             win.title(f"Monitor \u2014 {date_str}")
@@ -919,16 +1087,28 @@ class TrayMonitor:
                     # Snap to whichever bracketing point is closer
                     if abs((plot_times[i] - t).total_seconds()) <= abs((plot_times[i + 1] - t).total_seconds()):
                         pt, bat, cpu, wif, mem = plot_times[i], bat_l, plot_cpu[i], plot_wifi[i], plot_mem[i]
+                        ram, commit, cache, np_p = plot_ram[i], plot_commit[i], plot_cache[i], plot_np[i]
                     else:
                         pt, bat, cpu, wif, mem = plot_times[i + 1], bat_r, plot_cpu[i + 1], plot_wifi[i + 1], plot_mem[i + 1]
+                        ram, commit, cache, np_p = plot_ram[i + 1], plot_commit[i + 1], plot_cache[i + 1], plot_np[i + 1]
                     wifi_str = f"{wif:.0f}%" if (wif is not None and not math.isnan(wif)) else "N/A"
                     mem_str  = f"{mem:.1f}%" if (mem is not None and not math.isnan(mem))  else "N/A"
                     if wif is not None and not math.isnan(wif):
                         wifi_str += f" ({_wifi_quality_label(wif)})"
                     if mem is not None and not math.isnan(mem):
                         mem_str += f" ({_mpi_label(mem)})"
+                    sub_parts = []
+                    if ram is not None and not math.isnan(ram):
+                        sub_parts.append(f"RAM:{ram:.0f}%")
+                    if commit is not None and not math.isnan(commit):
+                        sub_parts.append(f"CR:{commit:.0f}%")
+                    if cache is not None and not math.isnan(cache):
+                        sub_parts.append(f"CD:{cache:.0f}%")
+                    if np_p is not None and not math.isnan(np_p):
+                        sub_parts.append(f"NP:{np_p:.0f}%")
+                    sub_str = ("    [" + "  ".join(sub_parts) + "]") if sub_parts else ""
                     status_var.set(
-                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}    MPI: {mem_str}"
+                        f"  Time: {pt.strftime('%H:%M:%S')}    Battery: {bat:.1f}%    CPU: {cpu:.1f}%    WiFi: {wifi_str}    MPI: {mem_str}{sub_str}"
                     )
                     # Update vertical line
                     pt_num = mdates.date2num(pt)
@@ -1016,6 +1196,7 @@ class TrayMonitor:
             try:
                 del status_bar, status_var, toolbar, canvas, fig, ax
                 del plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem
+                del plot_ram, plot_commit, plot_cache, plot_np
                 del vline, dot_bat, dot_cpu, dot_wifi, dot_mem, _cursor_artists
             except Exception:
                 pass
@@ -1067,7 +1248,7 @@ class TrayMonitor:
         # Get battery info before stopping
         info = self._get_battery_info()
 
-        threshold = int(self.config.get('threshold', 20))
+        threshold = int(self.config.get('battery_threshold_percentage', 20))
         if self.config.get('telegram_enabled'):
             if info:
                 exit_msg = f"⏹️ Monitoring stopped\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
@@ -1200,7 +1381,8 @@ class TrayMonitor:
             logging.error(f"Failed to rotate logs: {e}")
 
     def _write_csv_row(self, timestamp, battery_percent, cpu_percent, charging,
-                        wifi_dbm=None, wifi_pct=None, mem_pressure=None):
+                        wifi_dbm=None, wifi_pct=None, mem_pressure=None,
+                        ram_used_pct=None, commit_ratio_pct=None, cache_depletion_pct=None, np_pool_pct=None):
         """Append a data row to today's dated CSV file, writing the header on first creation."""
         date_str = timestamp[:10]  # 'YYYY-MM-DD'
         csv_path = os.path.join(CSV_LOG_DIR, f'battery_log_{date_str}.csv')
@@ -1210,11 +1392,16 @@ class TrayMonitor:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow(['timestamp', 'battery_percent', 'cpu_percent', 'charging',
-                                     'wifi_dbm', 'wifi_pct', 'mem_pressure'])
+                                     'wifi_dbm', 'wifi_pct', 'mem_pressure',
+                                     'ram_used_pct', 'commit_ratio_pct', 'cache_depletion_pct', 'np_pool_pct'])
                 writer.writerow([timestamp, battery_percent, cpu_percent, charging,
                                  wifi_dbm if wifi_dbm is not None else '',
                                  wifi_pct if wifi_pct is not None else '',
-                                 mem_pressure if mem_pressure is not None else ''])
+                                 mem_pressure if mem_pressure is not None else '',
+                                 ram_used_pct if ram_used_pct is not None else '',
+                                 commit_ratio_pct if commit_ratio_pct is not None else '',
+                                 cache_depletion_pct if cache_depletion_pct is not None else '',
+                                 np_pool_pct if np_pool_pct is not None else ''])
         except Exception as e:
             logging.error(f"Failed to write CSV log: {e}")
 
@@ -1254,17 +1441,26 @@ class TrayMonitor:
             has_wifi = any(not math.isnan(v) for v in wifi_pct_raw)
             mem_pressure_raw = [_safe_float(r.get('mem_pressure', '')) for r in rows]
             has_mem = any(not math.isnan(v) for v in mem_pressure_raw)
+            ram_used_raw        = [_safe_float(r.get('ram_used_pct', ''))        for r in rows]
+            commit_ratio_raw    = [_safe_float(r.get('commit_ratio_pct', ''))    for r in rows]
+            cache_depletion_raw = [_safe_float(r.get('cache_depletion_pct', '')) for r in rows]
+            np_pool_raw         = [_safe_float(r.get('np_pool_pct', ''))         for r in rows]
 
             # Insert NaN breaks where the gap between consecutive points exceeds
-            # 2× the data_log_interval (computer was likely asleep or stopped).
-            gap_threshold_s = int(self.config.get('data_log_interval', 60)) * 2
+            # 2× the data_log_interval_seconds (computer was likely asleep or stopped).
+            gap_threshold_s = int(self.config.get('data_log_interval_seconds', 60)) * 2
             plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem = [], [], [], [], []
+            plot_ram, plot_commit, plot_cache, plot_np = [], [], [], []
             for i in range(len(times)):
                 plot_times.append(times[i])
                 plot_battery.append(battery[i])
                 plot_cpu.append(cpu[i])
                 plot_wifi.append(wifi_pct_raw[i])
                 plot_mem.append(mem_pressure_raw[i])
+                plot_ram.append(ram_used_raw[i])
+                plot_commit.append(commit_ratio_raw[i])
+                plot_cache.append(cache_depletion_raw[i])
+                plot_np.append(np_pool_raw[i])
                 if i + 1 < len(times):
                     gap = (times[i + 1] - times[i]).total_seconds()
                     if gap > gap_threshold_s:
@@ -1273,6 +1469,10 @@ class TrayMonitor:
                         plot_cpu.append(math.nan)
                         plot_wifi.append(math.nan)
                         plot_mem.append(math.nan)
+                        plot_ram.append(math.nan)
+                        plot_commit.append(math.nan)
+                        plot_cache.append(math.nan)
+                        plot_np.append(math.nan)
 
             fig = matplotlib.figure.Figure(figsize=(14, 7.5))
             ax = fig.add_subplot(1, 1, 1)
@@ -1325,13 +1525,13 @@ class TrayMonitor:
             ax.legend(handles=legend_elements, loc='upper center',
                       bbox_to_anchor=(0.5, -0.18), ncol=len(legend_elements),
                       frameon=True, fontsize=9)
-            ax.set_title(f'Battery, CPU, WiFi, MPI — {date_str} — {HOSTNAME}  (press Esc to close)')
+            ax.set_title(f'Battery, CPU, WiFi, MPI — {date_str} — {HOSTNAME}  (press Esc to close)', fontsize=18)
             if times[0] != times[-1]:
                 ax.set_xlim(times[0], times[-1])
             ax.grid(True, axis='y', alpha=0.3)
             ax.grid(True, axis='x', alpha=0.07)
             fig.tight_layout(rect=[0, 0.08, 1, 1])
-            return fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem
+            return fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem, plot_ram, plot_commit, plot_cache, plot_np
         except Exception as e:
             logging.error(f"Failed to build graph figure for {date_str}: {e}")
             return None
@@ -1341,9 +1541,9 @@ class TrayMonitor:
         result = self._build_graph_figure(date_str)
         if result is None:
             return None
-        fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem = result
+        fig, ax, plot_times, plot_battery, plot_cpu, plot_wifi, plot_mem, *_ = result
         try:
-            graph_path = os.path.join(ROOT_DIR, f'battery_log_{date_str}.png')
+            graph_path = os.path.join(LOGS_DIR, f'battery_log_{date_str}.png')
             fig.savefig(graph_path, dpi=100)
             return graph_path
         except Exception as e:
@@ -1389,7 +1589,7 @@ class TrayMonitor:
         """Check all local fixed drives and send a Telegram alert for any at/above the threshold."""
         if not psutil:
             return
-        threshold = int(self.config.get('disk_alert_threshold', 90))
+        threshold = int(self.config.get('disk_alert_threshold_percentage', 90))
         conf = self.config.get('telegram_conf')
         try:
             for part in psutil.disk_partitions(all=False):
@@ -1422,8 +1622,8 @@ class TrayMonitor:
             # refresh config each loop in case user changed settings
             cfg = load_config()
             self.config.update(cfg)
-            interval = int(self.config.get('interval', 1))
-            threshold = int(self.config.get('threshold', 20))
+            interval = int(self.config.get('check_interval_seconds', 1))
+            threshold = int(self.config.get('battery_threshold_percentage', 20))
             resend_minutes = int(self.config.get('resend_minutes', 5))
             resend_seconds = resend_minutes * 60
 
@@ -1457,7 +1657,7 @@ class TrayMonitor:
                         logging.error(f"Disk alert time parse error: {e}")
 
                 # CSV logging
-                data_log_interval = int(self.config.get('data_log_interval', 60))
+                data_log_interval = int(self.config.get('data_log_interval_seconds', 60))
                 if (self._last_csv_time is None) or ((now - self._last_csv_time) >= data_log_interval):
                     # Use interval=1 on the first call so psutil has a real time window to measure;
                     # interval=None on subsequent calls uses the delta from the previous call.
@@ -1468,7 +1668,11 @@ class TrayMonitor:
                     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     self._write_csv_row(timestamp, percent, cpu_percent, plugged,
                                          wifi_dbm=self._wifi_dbm, wifi_pct=self._wifi_pct,
-                                         mem_pressure=self._mem_pressure)
+                                         mem_pressure=self._mem_pressure,
+                                         ram_used_pct=self._mem_stats.get('ram_used_pct') if self._mem_stats else None,
+                                         commit_ratio_pct=self._mem_stats.get('commit_ratio_pct') if self._mem_stats else None,
+                                         cache_depletion_pct=self._mem_stats.get('cache_depletion_pct') if self._mem_stats else None,
+                                         np_pool_pct=self._mem_stats.get('np_pool_pct') if self._mem_stats else None)
                     self._last_csv_time = now
 
                 # Update battery icon
@@ -1538,6 +1742,27 @@ class TrayMonitor:
                             self._was_low = False
                             self._low_start_time = None
 
+                # MPI threshold alert
+                mpi_threshold = int(self.config.get('mpi_threshold_percentage', 90))
+                if self._mem_pressure is not None and self._mem_pressure >= mpi_threshold:
+                    if (self._last_mpi_alert_time is None) or ((now - self._last_mpi_alert_time) >= resend_seconds):
+                        msg = f"{ALERT_BORDER}\n🧠 MPI high: {self._mem_pressure:.1f}% (Alert at {mpi_threshold}%)"
+                        msg += _mpi_substats_block(self._mem_stats)
+                        msg += f"\n{ALERT_BORDER}"
+                        if self.config.get('telegram_enabled'):
+                            send_telegram_async(msg, conf=self.config.get('telegram_conf'))
+                        self._notify(msg)
+                        self._last_mpi_alert_time = now
+                    self._was_mpi_high = True
+                else:
+                    if self._was_mpi_high and self._mem_pressure is not None:
+                        rec_msg = f"✅ MPI back to normal: {self._mem_pressure:.1f}% (Alert was at {mpi_threshold}%)"
+                        if self.config.get('telegram_enabled'):
+                            send_telegram_async(rec_msg, conf=self.config.get('telegram_conf'))
+                        self._notify(rec_msg)
+                    self._was_mpi_high = False
+                    self._last_mpi_alert_time = None
+
             for _ in range(int(interval)):
                 if self._stop_event.is_set():
                     break
@@ -1605,7 +1830,7 @@ class TrayMonitor:
         msg = f"ℹ️ Info — {now_str}\n"
         info = self._get_battery_info()
         if info:
-            threshold = int(self.config.get('threshold', 20))
+            threshold = int(self.config.get('battery_threshold_percentage', 20))
             msg += f"\n🔋 Battery {info['percent']}% (Alert at {threshold}%)"
             msg += f"\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"
             if info.get('time_left'):
@@ -1688,7 +1913,7 @@ if __name__ == '__main__':
     # Send startup Telegram message then graphs (in order) in one thread
     if cfg.get('telegram_enabled'):
         info = monitor._get_battery_info()
-        threshold = int(cfg.get('threshold', 20))
+        threshold = int(cfg.get('battery_threshold_percentage', 20))
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if info:
             startup_msg = f"▶️ Battery Monitor v{__version__} \u2014 Started\n\n🔋 Battery {info['percent']}% (Alert at {threshold}%)\n{'🔌 Charging' if info['plugged'] else '⚡ Discharging'}"

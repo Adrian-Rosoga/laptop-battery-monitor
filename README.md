@@ -2,7 +2,7 @@
 
 A lightweight Windows 11 system-tray application that monitors battery level, WiFi signal strength, CPU usage, and disk space — and sends Telegram alerts when thresholds are exceeded.
 
-> **v2.4** — Status window shows MPI sub-scores (RAM Used, Commit Ratio, Cache Depletion, NP Pool) in a tkinter dialog; all Telegram messages include the same sub-scores beneath the MPI line.
+> **v2.5** — MPI high-pressure alerts (Telegram + desktop notification); Help dialog in tray menu; all CSV logs now include MPI sub-score columns; graph cursor readout shows sub-scores; `logs/` subfolder for all CSV/PNG/log files; config keys renamed for clarity.
 
 ---
 
@@ -20,6 +20,11 @@ A lightweight Windows 11 system-tray application that monitors battery level, Wi
 - **MPI sub-scores** — four weighted components shown beneath the MPI line in the Status window and in all Telegram messages: RAM Used, Commit Ratio, Cache Depletion, NP Pool
 - **Status window** — "Status" tray menu item opens a tkinter dialog with full stats (no 256-char balloon-tip limit); includes battery, WiFi, MPI + sub-scores, CPU, disk, last-alert time
 - **Telegram remote query** — send `info <hostname>` from Telegram desktop to get a live stats snapshot + today's and yesterday's graphs on demand; hostname match is case-insensitive (see section below)
+- **MPI high-pressure alert** — Telegram message + desktop notification when MPI exceeds a configurable threshold; a recovery notification is sent when MPI drops back below the threshold
+- **Help dialog** — "Help" tray menu item opens a scrollable tkinter window with overview, WiFi dBm mapping, MPI bands, MPI breakdown, Telegram remote query guide, tray icon guide, and paths to config/logs
+- **Logs subfolder** — all CSV files, graph PNG exports, and log files are written to `logs/` next to the executable (created automatically)
+- **MPI sub-scores in graph cursor** — hovering on the graph status bar shows RAM, Commit Ratio, Cache Depletion, and NP Pool sub-scores alongside the main MPI value
+- **MPI sub-scores in CSV** — four new columns (`ram_used_pct`, `commit_ratio_pct`, `cache_depletion_pct`, `np_pool_pct`) appended to every CSV row
 - **Notification polish** — desktop popups now show "Laptop Monitor v…" as title (instead of "Python") with the app icon; WiFi quality label (Excellent/Good/Fair/Poor) and MPI meaning (Normal/Moderate/High/Critical) are included in all Telegram messages and notifications
 
 ### Memory Pressure Index (MPI)
@@ -144,32 +149,34 @@ All settings are stored in `monitor_config.json` next to the executable. They ca
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `threshold` | `20` | Battery % at which low-battery alerts fire |
-| `interval` | `1` | Battery check interval in seconds |
+| `battery_threshold_percentage` | `20` | Battery % at which low-battery alerts fire |
+| `check_interval_seconds` | `1` | Battery check interval in seconds |
 | `resend_minutes` | `5` | How often to re-send the low-battery alert while still low |
 | `telegram_enabled` | `false` | Enable/disable all Telegram messages |
 | `telegram_conf` | `null` | Path to `telegram-send.conf`; auto-detected if blank |
-| `data_log_interval` | `60` | How often to write a CSV row (seconds) |
+| `data_log_interval_seconds` | `60` | How often to write a CSV row (seconds) |
 | `data_log_retention_days` | `30` | CSV/log files older than this are deleted on startup |
 | `disk_alert_enabled` | `true` | Enable daily disk-space Telegram alert |
-| `disk_alert_threshold` | `90` | Drive usage % that triggers an alert |
+| `disk_alert_threshold_percentage` | `90` | Drive usage % that triggers an alert |
 | `disk_alert_time` | `"07:00"` | Local time (24 h, `HH:MM`) to run the disk check |
-| `logging_enabled` | `false` | Write a dated log file (`battery_monitor_YYYY-MM-DD.log`) |
+| `mpi_threshold_percentage` | `90` | MPI % at which high-pressure alerts fire |
+| `logging_enabled` | `false` | Write a dated log file to `logs/` (`battery_monitor_YYYY-MM-DD.log`) |
 
 Example `monitor_config.json`:
 
 ```json
 {
-  "threshold": 30,
-  "interval": 1,
+  "battery_threshold_percentage": 30,
+  "check_interval_seconds": 1,
   "resend_minutes": 5,
   "telegram_enabled": true,
   "telegram_conf": "C:\\Bin\\Run\\telegram-send.conf",
-  "data_log_interval": 60,
+  "data_log_interval_seconds": 60,
   "data_log_retention_days": 30,
   "disk_alert_enabled": true,
-  "disk_alert_threshold": 90,
+  "disk_alert_threshold_percentage": 90,
   "disk_alert_time": "07:00",
+  "mpi_threshold_percentage": 90,
   "logging_enabled": false
 }
 ```
