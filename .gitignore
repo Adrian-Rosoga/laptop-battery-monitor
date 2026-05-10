@@ -1,6 +1,6 @@
 # PyInstaller
 build/
-dist/
+#dist/
 *.spec
 
 # Python
